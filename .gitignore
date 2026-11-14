@@ -1,0 +1,9 @@
+out/
+build/
+*.zip
+*.sha256
+*.img
+*.log
+*.o
+*.elf
+.DS_Store

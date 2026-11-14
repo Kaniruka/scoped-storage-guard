@@ -1,0 +1,18 @@
+#!/bin/sh
+# Offline stub of the built svctl helper (tests only).
+[ -e "$STUB_CONTROL" ] || exit 1
+case "$1" in
+status)
+	printf 'generation=%s count=%s\n' "$(cat "$STUB_GEN")" "$(cat "$STUB_COUNT")"
+	;;
+clear)
+	echo "clear $2" >>"$STUB_CALLS/all"
+	[ "$2" = "$(cat "$STUB_GEN")" ] || exit 3
+	echo $(($(cat "$STUB_GEN") + ${STUB_CLEAR_JUMP:-1})) >"$STUB_GEN"
+	echo 0 >"$STUB_COUNT"
+	printf 'cleared generation=%s\n' "$2"
+	;;
+*)
+	exit 2
+	;;
+esac

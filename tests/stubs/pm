@@ -1,0 +1,19 @@
+#!/bin/sh
+# Offline PackageManager stub (tests only).
+case "$1 $2" in
+"list users")
+	cat "$STUB_USERS"
+	;;
+"list packages")
+	[ -n "${STUB_PM_RC:-}" ] && exit "$STUB_PM_RC"
+	if [ -n "${STUB_PM_GARBAGE:-}" ]; then
+		echo "unexpected response line"
+		exit 0
+	fi
+	uid=$5
+	pkg=$6
+	line=$(grep -F -- "$uid:$pkg:" "$STUB_PKGS" 2>/dev/null | head -n1)
+	[ -n "$line" ] && printf 'package:%s uid:%s\n' "$pkg" "$(printf '%s' "$line" | cut -d: -f3)"
+	;;
+esac
+exit 0

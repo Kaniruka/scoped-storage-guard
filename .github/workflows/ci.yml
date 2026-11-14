@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
+        with:
+          persist-credentials: false
+      - name: install toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc gcc-aarch64-linux-gnu shellcheck zip unzip python3
+      - name: shell syntax
+        run: make check
+      - name: host helpers
+        run: make host
+      - name: offline tests
+        run: make test
+      - name: arm64 helpers and module zip
+        run: |
+          export SOURCE_DATE_EPOCH=1794614400
+          make module
+      - name: verify package
+        run: |
+          set -euo pipefail
+          zip=$(ls build/scoped-storage-guard-*.zip)
+          unzip -l "$zip"
+          python3 -c 'import sys,zipfile;z=zipfile.ZipFile(sys.argv[1]);need=("module.prop post-fs-data.sh service.sh action.sh uninstall.sh customize.sh skip_mount bin/svreg bin/svctl bin/autostart.sh bin/scvctl.sh bin/scv-resolve.sh bin/scv-prop.sh config/scv.conf src/svreg.c src/svctl.c src/sv_parse.c src/sv_parse.h include/uapi/linux/scoped_visibility.h README.md NOTICE.md LICENSE LICENSES/Linux-syscall-note").split();missing=[n for n in need if n not in z.namelist()];sys.exit("missing members: "+" ".join(missing)) if missing else None;sys.exit("bin/svreg is not an ELF file") if z.read("bin/svreg")[:4]!=b"\x7fELF" else None;sys.exit("config/scv.conf does not carry the default user=auto") if b"user=auto" not in z.read("config/scv.conf") else None;print("package contents ok")' "$zip"
+      - name: reject personal paths and hardcoded identities
+        run: |
+          ! grep -rn '/home/' module src config tests build.sh Makefile
+          ! grep -rnE 'mayfly|10275|\b999\b' module src config
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: scoped-storage-guard-zip
+          path: build/scoped-storage-guard-*.zip

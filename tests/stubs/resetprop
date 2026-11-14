@@ -1,0 +1,8 @@
+#!/bin/sh
+# Offline resetprop stub (tests only): records -n/--delete without persistence.
+printf '%s\n' "$*" >>"$STUB_RESETPROP_LOG"
+case "$1" in
+-n) printf '%s' "$3" >"$STUB_PROP" ;;
+--delete) : >"$STUB_PROP" ;;
+esac
+exit 0

@@ -1,0 +1,11 @@
+#!/bin/sh
+# Offline getprop stub (tests only).
+# No arguments: dump form, so callers can tell "absent" from "present empty".
+if [ $# -eq 0 ]; then
+	[ "${STUB_PROP_ABSENT:-0}" = 1 ] && exit 0
+	[ -f "$STUB_PROP" ] || exit 0
+	printf '[persist.sys.vold_app_data_isolation_enabled]: [%s]\n' "$(cat "$STUB_PROP")"
+	exit 0
+fi
+[ -f "$STUB_PROP" ] && cat "$STUB_PROP"
+exit 0

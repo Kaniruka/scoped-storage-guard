@@ -1,0 +1,82 @@
+#!/bin/sh
+# Offline stub of the built svreg helper (tests only).
+ALLOW="fuse,f2fs,ext4"
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--fs-allow) ALLOW=$2; shift 2 ;;
+	--control) shift 2 ;;
+	*) break ;;
+	esac
+done
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+fs_ok() { case ",$ALLOW," in *",$1,"*) return 0 ;; esac; return 1; }
+
+field() { printf '%s' "$1" | cut -d'|' -f"$2"; }
+
+case "$cmd" in
+inspect)
+	n=0
+	[ -f "$STUB_CALLS/inspect.n" ] && n=$(cat "$STUB_CALLS/inspect.n")
+	n=$((n + 1))
+	echo "$n" >"$STUB_CALLS/inspect.n"
+	bump=0
+	[ -n "${STUB_INO_BUMP_AFTER:-}" ] && [ "$n" -gt "$STUB_INO_BUMP_AFTER" ] && bump=1
+	rejected=0
+	for p in "$@"; do
+		line=$(grep -F -- "$p|" "$STUB_WORLD" 2>/dev/null | head -n1)
+		if [ -n "${STUB_REMOVE_AFTER:-}" ] && [ "$n" -gt "$STUB_REMOVE_AFTER" ] &&
+			[ "$p" = "${STUB_REMOVE_PATH:-}" ]; then
+			line=
+		fi
+		if [ -z "$line" ]; then
+			printf 'REJECT path=%s reason=missing errno=2\n' "$p"
+			rejected=1
+			continue
+		fi
+		fs=$(field "$line" 2)
+		dev=$(field "$line" 3)
+		ino=$(field "$line" 4)
+		[ "$bump" = 1 ] && ino=$((ino + 1000))
+		printf 'OBJECT path=%s dev=%s ino=%s fs=%s\n' "$p" "$dev" "$ino" "$fs"
+		if fs_ok "$fs"; then elig=yes; else elig=no; fi
+		printf 'VERDICT path=%s fs=%s eligible=%s\n' "$p" "$fs" "$elig"
+	done
+	[ "$rejected" = 1 ] && exit 4
+	exit 0
+	;;
+apply)
+	gen=$1
+	conf=$2
+	echo "apply gen=$gen" >>"$STUB_CALLS/all"
+	cur=$(cat "$STUB_GEN")
+	[ "$gen" = "$cur" ] || exit 3
+	if [ -n "${STUB_BUMP_BEFORE_APPLY:-}" ]; then
+		echo $((cur + 1)) >"$STUB_GEN"
+		exit 3
+	fi
+	violent=0
+	while IFS="$(printf '\t')" read -r p ranges; do
+		[ -n "$p" ] || continue
+		line=$(grep -F -- "$p|" "$STUB_WORLD" 2>/dev/null | head -n1)
+		if [ -z "$line" ]; then
+			echo "apply: missing $p" >&2
+			violent=1
+			continue
+		fi
+		fs=$(field "$line" 2)
+		fs_ok "$fs" || { echo "apply: fs $fs not allowed" >&2; violent=1; }
+		case "$p" in
+		/mnt/user/*) [ "$fs" = fuse ] || { echo "apply: non-fuse alias $p" >&2; violent=1; } ;;
+		esac
+	done <"$conf"
+	[ "$violent" = 1 ] && exit 4
+	count=$(grep -c . "$conf")
+	cp "$conf" "$STUB_APPLIED"
+	echo $((cur + 1)) >"$STUB_GEN"
+	echo "$count" >"$STUB_COUNT"
+	printf 'PUBLISHED generation=%s count=%s\n' "$((cur + 1))" "$count"
+	exit 0
+	;;
+esac
+exit 2
