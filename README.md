@@ -16,7 +16,7 @@ Repository: <https://github.com/Kaniruka/scoped-storage-guard>
 * `CONFIG_SECURITYFS=y` and a mounted securityfs (the control node lives at
   `/sys/kernel/security/scoped_visibility/control`)
 
-Related pull requests (stacked, not merged):
+Merged kernel pull requests:
 [#2](https://github.com/Kaniruka/android_gki_kernel_5.10_common/pull/2) and
 [#3](https://github.com/Kaniruka/android_gki_kernel_5.10_common/pull/3).
 
