@@ -131,9 +131,18 @@ status and logs carry no path list and no UID table.
   For the same reason, record fields are split with `cut -d'|'` rather than
   `${rec#*|}`: `mksh` treats a bare `|` in a pattern as alternation.
 * Version 1.0.0 of the predecessor module was verified on one Android 17
-  (API 37) / kernel 5.10.240 device. The 1.1.x trees are offline-verified only;
-  they do not claim device results. 1.1.1 changes the install hook, the UID
-  bound check, the version fields and the tests (see `CHANGELOG.md`).
+  (API 37) / kernel 5.10.240 device. 1.1.1 was verified on the same device line
+  without reflashing its kernel: automatic publication `generation=1 count=8`
+  for two users, the 20-case joint matrix plus four core directions, owner-side
+  read/write controls, root-only state permissions (0700/0600) and `Enforcing`
+  SELinux. A still-locked secondary user keeps the supervisor in
+  `WAITING STORAGE_PENDING` and nothing is published until that user unlocks
+  and its raw lower objects exist -- that is the documented boundary, not a
+  module failure.
+* One device result does not generalize. The ROM must implement the native
+  tmpfs own/shared-UID view behind
+  `persist.sys.vold_app_data_isolation_enabled`; other devices and ROMs remain
+  unverified, and no coverage claim is made beyond the limits listed here.
 
 ## Build and test
 
