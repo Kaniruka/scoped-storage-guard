@@ -1,11 +1,26 @@
 #!/system/bin/sh
 # KernelSU install hook: capability gates only, never a device-name filter.
 #
+# KernelSU SOURCES this file into the installer shell
+# (userspace/ksud/src/android/module/installer.sh), so it runs in the caller's
+# shell and must not change shell options. A `set -u` here leaks into the
+# installer: installer.sh's own `set_perm` reads its 5th argument ("$5", the
+# SELinux context) unconditionally while building the chcon call, so under
+# unbound-name checking that line aborts the whole install -- even for the
+# four-argument calls below that never pass a context -- with
+# "5: parameter not set" -- reported at the sourcing script, i.e. this file.
+# Never add `set -u` or a global `set +u` (the latter would silently weaken
+# the caller instead). Every name is defaulted explicitly below.
+#
 # KernelSU applies set_perm_recursive(0755/0644) to the staged module before
 # this file runs, so helpers can still be 0644 here. Every file the UAPI probe
 # executes is made executable first; otherwise the probe fails with EACCES on
 # every device.
-set -u
+
+MODPATH=${MODPATH:-}
+if [ -z "$MODPATH" ] || [ ! -d "$MODPATH" ]; then
+	abort "! MODPATH is unset: this hook must be sourced by the KernelSU installer"
+fi
 
 ui_print "- Scoped Storage Guard: checking package, architecture and kernel interface"
 

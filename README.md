@@ -95,6 +95,13 @@ install the module. The installer checks arm64, the control node and the UAPI;
 it does not filter by device name. A still-enabled legacy module
 `gki_scoped_visibility` must be disabled and rebooted first (single writer).
 
+The install hook `customize.sh` is sourced into the KernelSU installer shell
+(`userspace/ksud/src/android/module/installer.sh`), so it never changes shell
+options: a `set -u` there leaks into the installer, whose own `set_perm` reads
+its fifth argument (`"$5"`, the SELinux context) unconditionally, so the
+install aborts with `5: parameter not set`. 1.1.1 fixed that; every variable in
+the hook is defaulted explicitly instead.
+
 ## Status and controls
 
 ```
@@ -117,16 +124,23 @@ status and logs carry no path list and no UID table.
 * Deeper bind mounts, already-open file descriptors, recreated inodes,
   `Android/media` public semantics and FUSE daemon rename paths are not
   covered.
+* The UID upper bound is decided as a decimal string, not arithmetically:
+  Android's `mksh` has 32-bit signed integers, so `[ 0 -ge 4294967295 ]` is
+  true there (the constant wraps to -1). 1.1.1 replaced the numeric bound and
+  rejects `4294967295` and above, plus non-canonical forms (`01000`, negatives).
+  For the same reason, record fields are split with `cut -d'|'` rather than
+  `${rec#*|}`: `mksh` treats a bare `|` in a pattern as alternation.
 * Version 1.0.0 of the predecessor module was verified on one Android 17
-  (API 37) / kernel 5.10.240 device. This 1.1.0 tree is offline-verified only;
-  it does not claim device results for 1.1.0.
+  (API 37) / kernel 5.10.240 device. The 1.1.x trees are offline-verified only;
+  they do not claim device results. 1.1.1 changes the install hook, the UID
+  bound check, the version fields and the tests (see `CHANGELOG.md`).
 
 ## Build and test
 
 ```
 make host        # host helpers
 make arm64       # static aarch64 helpers
-make test        # offline stub suite + host helper checks (no device, no kernel)
+make test        # offline stub suite + installer contract + host checks
 make module      # build/scoped-storage-guard-<version>.zip + MANIFEST
 KERNEL_IMAGE=/path/to/Image make smoke   # optional QEMU control-node smoke
 ```

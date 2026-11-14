@@ -1,6 +1,6 @@
 id=scoped_storage_guard
 name=Scoped Storage Guard
-version=1.1.0
-versionCode=1100
+version=1.1.1
+versionCode=1101
 author=Rukani (Kaniruka)
 description=Boot-time RAM-only activation of the native app-data isolation key and a verified scoped_visibility snapshot for the covered users. Requires the matching patched kernel; no persistent change, no module-specific property.

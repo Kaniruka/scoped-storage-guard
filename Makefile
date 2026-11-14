@@ -36,6 +36,9 @@ $(OUT)/svctl.arm64: $(HELPERS) src/sv_parse.h include/uapi/linux/scoped_visibili
 
 test: host
 	bash tests/selftest.sh
+	bash tests/installer.sh
+	bash tests/u32.sh
+	bash tests/resolver.sh
 	bash tests/host-svreg.sh
 
 module: arm64 host

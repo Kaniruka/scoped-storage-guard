@@ -24,7 +24,7 @@ cp -a "$HERE/out/svreg.arm64" "$STAGE/bin/svreg"
 cp -a "$HERE/out/svctl.arm64" "$STAGE/bin/svctl"
 cp -a src/sv_parse.c src/sv_parse.h src/svreg.c src/svctl.c "$STAGE/src/"
 cp -a include/uapi/linux/scoped_visibility.h "$STAGE/include/uapi/linux/"
-cp -a README.md NOTICE.md LICENSE "$STAGE/"
+cp -a README.md NOTICE.md CHANGELOG.md LICENSE "$STAGE/"
 cp -a LICENSES/Linux-syscall-note "$STAGE/LICENSES/Linux-syscall-note"
 
 chmod 0755 "$STAGE/post-fs-data.sh" "$STAGE/service.sh" "$STAGE/action.sh" \
@@ -34,7 +34,7 @@ chmod 0755 "$STAGE/post-fs-data.sh" "$STAGE/service.sh" "$STAGE/action.sh" \
 	"$STAGE/bin/svreg" "$STAGE/bin/svctl"
 chmod 0600 "$STAGE/config/scv.conf"
 chmod 0644 "$STAGE/module.prop" "$STAGE/skip_mount" "$STAGE/README.md" \
-	"$STAGE/NOTICE.md" "$STAGE/LICENSE"
+	"$STAGE/NOTICE.md" "$STAGE/CHANGELOG.md" "$STAGE/LICENSE"
 
 echo "== manifest"
 (

@@ -219,6 +219,53 @@ line=$(grep -F '/data/media/0/Android/data' "$D/applied")
 case "$line" in *"10055-10055"*) ok "provider: explicit UID present" ;; *) bad "provider: explicit UID present" ;; esac
 case "$line" in *"90055-90055"*) bad "provider: explicit UID only" ;; *) ok "provider: explicit UID only" ;; esac
 
+# -------------------------------------------------------------- uid bounds ---
+# Android mksh uses 32-bit signed integers, so a numeric upper bound such as
+# [ 0 -ge 4294967295 ] is TRUE on device and refused every valid UID. The bound
+# is decided as a decimal string; these cases pin the accepted/rejected edges.
+new_case uid_max
+fixture_single
+sed -i 's/^allow_uid=1000$/allow_uid=1000\nallow_uid=4294967294/' "$D/scv.conf"
+run_sup
+eq "uid: uint32 max accepted" "$(state state)" PUBLISHED
+file_has "uid: max range present" "$D/state/snapshot" "10055-10055,4294967294-4294967294"
+
+new_case uid_over_max
+fixture_single
+sed -i 's/^allow_uid=1000$/allow_uid=1000\nallow_uid=4294967295/' "$D/scv.conf"
+run_sup
+eq "uid: 4294967295 refused" "$(state state)" CONFIG_REQUIRED
+eq "uid: 4294967295 reason" "$(state reason)" "UID_INVALID:4294967295"
+file_absent "uid: 4294967295 not applied" "$D/applied"
+
+new_case uid_over_32
+fixture_single
+sed -i 's/^allow_uid=1000$/allow_uid=1000\nallow_uid=4294967296/' "$D/scv.conf"
+run_sup
+eq "uid: 4294967296 refused" "$(state state)" CONFIG_REQUIRED
+eq "uid: 4294967296 reason" "$(state reason)" "UID_INVALID:4294967296"
+
+new_case uid_huge
+fixture_single
+sed -i 's/^allow_uid=1000$/allow_uid=1000\nallow_uid=99999999999999999999/' "$D/scv.conf"
+run_sup
+eq "uid: 20-digit token refused" "$(state state)" CONFIG_REQUIRED
+eq "uid: 20-digit reason" "$(state reason)" "UID_INVALID:99999999999999999999"
+
+new_case uid_leading_zero
+fixture_single
+sed -i 's/^allow_uid=1000$/allow_uid=1000\nallow_uid=01000/' "$D/scv.conf"
+run_sup
+eq "uid: leading zero refused" "$(state state)" CONFIG_REQUIRED
+eq "uid: leading zero reason" "$(state reason)" "UID_NOT_CANONICAL:01000"
+
+new_case uid_negative
+fixture_single
+sed -i 's/^allow_uid=1000$/allow_uid=1000\nallow_uid=-1/' "$D/scv.conf"
+run_sup
+eq "uid: negative refused" "$(state state)" CONFIG_REQUIRED
+eq "uid: negative reason" "$(state reason)" "CONFIG_INVALID:bad-allow-uid"
+
 # --------------------------------------------------- partial per-kind FUSE --
 new_case partial_fuse
 fixture_single
@@ -464,13 +511,30 @@ export STUB_SVCTL_CALLS=$D/probe.log
 cat >"$D/inst.sh" <<'EOS'
 ui_print() { :; }
 abort() { echo "abort: $*" >&2; exit 1; }
-set_perm() { chmod "$4" "$1" 2>/dev/null; }
+# installer.sh contract: the optional SELinux context is read without a default,
+# so a leaked "set -u" from the sourced hook would abort here.
+set_perm() {
+	chmod "$4" "$1" 2>/dev/null
+	if [ -z "$5" ]; then SE_CONTEXT=; else SE_CONTEXT=$5; fi
+}
+opts_before=$-
 . "$CUSTOMIZE"
+opts_mid=$-
+# installer.sh also installs permissions after the hook returns.
+set_perm "$MODPATH/module.prop" 0 0 0644
+opts_after=$-
+printf 'OPTS before=%s mid=%s after=%s\n' "$opts_before" "$opts_mid" "$opts_after"
+[ "$opts_before" = "$opts_mid" ] && [ "$opts_mid" = "$opts_after" ] || {
+	echo "OPTION-LEAK: $opts_before -> $opts_mid -> $opts_after" >&2
+	exit 7
+}
 EOS
 [ -x "$MOD/bin/svctl" ] && bad "installer: helper starts non-executable" || ok "installer: helper starts non-executable"
 CUSTOMIZE="$MOD/customize.sh" MODPATH="$MOD" ARCH=arm64 sh "$D/inst.sh" >"$D/inst.out" 2>&1; rc=$?
 eq "installer: succeeds with 0644 staging" "$rc" 0
 file_has "installer: probe executed" "$D/probe.log" "called"
+file_has "installer: caller options preserved" "$D/inst.out" "OPTS before="
+file_lacks "installer: no unbound optional parameter" "$D/inst.out" "parameter not set"
 eq "installer: helper executable afterwards" "$(mode_of "$MOD/bin/svctl")" 755
 rm -f "$D/control"
 CUSTOMIZE="$MOD/customize.sh" MODPATH="$MOD" ARCH=arm64 sh "$D/inst.sh" >"$D/inst2.out" 2>&1; rc=$?

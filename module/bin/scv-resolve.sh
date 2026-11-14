@@ -133,6 +133,39 @@ probe_file() { # list out
 	done
 }
 
+# BEGIN sv-u32
+# 0..4294967294 as a strict canonical decimal token.
+#
+# The upper bound must never be an arithmetic comparison: Android's mksh has
+# 32-bit signed integers, so [ 0 -ge 4294967295 ] is TRUE there (the constant
+# wraps to -1) and every valid UID was rejected as UID_INVALID:0. Equal-width
+# digit strings order lexicographically exactly like numbers, so the 10-digit
+# tail below is decided by pattern matching, with no arithmetic at all and no
+# dependence on the caller's integer width.
+u32_bound_ok() {
+	case "$1" in
+	'') return 1 ;;
+	esac
+	if [ "${#1}" -le 9 ]; then
+		return 0
+	fi
+	[ "${#1}" -eq 10 ] || return 1
+	case "$1" in
+	[1-3]?????????) return 0 ;;   # 1 000 000 000 .. 3 999 999 999
+	4[0-1]????????) return 0 ;;   # 4 000 000 000 .. 4 199 999 999
+	42[0-8]???????) return 0 ;;   # 4 200 000 000 .. 4 289 999 999
+	429[0-3]??????) return 0 ;;   # 4 290 000 000 .. 4 293 999 999
+	4294[0-8]?????) return 0 ;;   # 4 294 000 000 .. 4 294 899 999
+	42949[0-5]????) return 0 ;;   # 4 294 900 000 .. 4 294 959 999
+	429496[0-6]???) return 0 ;;   # 4 294 960 000 .. 4 294 966 999
+	4294967[0-1]??) return 0 ;;   # 4 294 967 000 .. 4 294 967 199
+	42949672[0-8]?) return 0 ;;   # 4 294 967 200 .. 4 294 967 289
+	429496729[0-4]) return 0 ;;   # 4 294 967 290 .. 4 294 967 294
+	esac
+	return 1
+}
+# END sv-u32
+
 # ---------------------------------------------------------------- config ----
 USERS_CFG=
 USERS_AUTO=1
@@ -186,9 +219,16 @@ while IFS= read -r raw || [ -n "$raw" ]; do
 		esac
 		;;
 	allow_uid)
+		# Canonical form is checked here, before "sort -n -u" can fold a
+		# leading-zero token into its numeric neighbour and hide it.
 		case "$val" in
 		''|*[!0-9]*) CONFIG_ERR=bad-allow-uid ;;
-		*) ALLOW_UIDS="$ALLOW_UIDS $val" ;;
+		0) ALLOW_UIDS="$ALLOW_UIDS $val" ;;
+		0*) emit config_required "UID_NOT_CANONICAL:$val" ;;
+		*)
+			u32_bound_ok "$val" || emit config_required "UID_INVALID:$val"
+			ALLOW_UIDS="$ALLOW_UIDS $val"
+			;;
 		esac
 		;;
 	fuse_root|fuse_data|fuse_obb)
@@ -304,6 +344,7 @@ if [ -n "$PROVIDER_PKG" ] && [ "$PROVIDER_UID" != off ]; then
 fi
 PROVIDER_UID_COUNT=$(printf '%s\n' $PROVIDER_UIDS | grep -c .)
 
+
 # ---------------------------------------------------------------- ranges ----
 # Sorted union of the explicit base identities and every UID PackageManager
 # reported. Provider UIDs are process identities: one process may serve several
@@ -321,9 +362,7 @@ for id in $UID_LIST; do
 	case "$id" in
 	*[!0-9]*) emit config_required "UID_INVALID:$id" ;;
 	esac
-	if [ "$id" -ge 4294967295 ]; then
-		emit config_required "UID_INVALID:$id"
-	fi
+	u32_bound_ok "$id" || emit config_required "UID_INVALID:$id"
 	RANGES="$RANGES$id-$id,"
 done
 RANGES=${RANGES%,}
@@ -361,8 +400,10 @@ for u in $USERS; do
 			ok_lower=0
 			continue
 		fi
-		fs=${rec#*|}
-		fs=${fs%%|*}
+		# `cut`, not ${rec#*|}: Android mksh treats a bare "|" inside a
+		# pattern as alternation, so ${rec#*|} left the whole record and the
+		# following ${fs%%|*} produced an empty fs (FS_NOT_ALLOWED:0).
+		fs=$(printf '%s' "$rec" | cut -d'|' -f2)
 		dev=$(printf '%s' "$rec" | cut -d'|' -f3)
 		ino=$(printf '%s' "$rec" | cut -d'|' -f4)
 		if ! fs_allowed "$fs"; then
@@ -382,8 +423,7 @@ for u in $USERS; do
 			if [ -z "$rec" ]; then
 				EXPLICIT_MISSING="$EXPLICIT_MISSING $pair"
 			else
-				fs=${rec#*|}
-				fs=${fs%%|*}
+				fs=$(printf '%s' "$rec" | cut -d'|' -f2)
 				if [ "$fs" = fuse ]; then
 					dev=$(printf '%s' "$rec" | cut -d'|' -f3)
 					ino=$(printf '%s' "$rec" | cut -d'|' -f4)
@@ -399,8 +439,7 @@ for u in $USERS; do
 		p="/mnt/user/$u/emulated/$u/Android/$kind"
 		rec=$(lookup "$p" "$PROBE")
 		[ -z "$rec" ] && continue
-		fs=${rec#*|}
-		fs=${fs%%|*}
+		fs=$(printf '%s' "$rec" | cut -d'|' -f2)
 		if [ "$fs" = fuse ]; then
 			dev=$(printf '%s' "$rec" | cut -d'|' -f3)
 			ino=$(printf '%s' "$rec" | cut -d'|' -f4)
@@ -439,8 +478,7 @@ for pair in $NEED; do
 		p="/mnt/user/$v/emulated/$u/Android/$kind"
 		rec=$(lookup "$p" "$PROBE2")
 		[ -z "$rec" ] && continue
-		fs=${rec#*|}
-		fs=${fs%%|*}
+		fs=$(printf '%s' "$rec" | cut -d'|' -f2)
 		if [ "$fs" = fuse ]; then
 			found=1
 			dev=$(printf '%s' "$rec" | cut -d'|' -f3)
