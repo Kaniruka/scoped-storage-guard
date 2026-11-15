@@ -12,6 +12,15 @@
 
 int sv_parse_number(const char **text, uint64_t limit, uint64_t *result);
 int sv_parse_ranges(const char *text, struct sv_entry *entry);
+struct sv_policy_v2 {
+	struct sv_snapshot_v2 header;
+	struct sv_root_v2 roots[SV_MAX_ENTRIES];
+	struct sv_package_v2 packages[SV_MAX_PACKAGES];
+};
+int sv_load_policy_v2(const char *path, struct sv_policy_v2 *policy,
+		      char *err, size_t errlen);
+void sv_close_policy_v2(struct sv_policy_v2 *policy);
+
 int sv_load_snapshot(const char *config_path, struct sv_snapshot *snapshot,
 		     char *err, size_t errlen);
 

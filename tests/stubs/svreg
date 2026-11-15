@@ -56,8 +56,8 @@ apply)
 		exit 3
 	fi
 	violent=0
-	while IFS="$(printf '\t')" read -r p ranges; do
-		[ -n "$p" ] || continue
+	while IFS="$(printf '\t')" read -r type p map ranges; do
+		[ "$type" = root ] || continue
 		line=$(grep -F -- "$p|" "$STUB_WORLD" 2>/dev/null | head -n1)
 		if [ -z "$line" ]; then
 			echo "apply: missing $p" >&2
@@ -71,7 +71,7 @@ apply)
 		esac
 	done <"$conf"
 	[ "$violent" = 1 ] && exit 4
-	count=$(grep -c . "$conf")
+	count=$(grep -c '^root' "$conf")
 	cp "$conf" "$STUB_APPLIED"
 	echo $((cur + 1)) >"$STUB_GEN"
 	echo "$count" >"$STUB_COUNT"

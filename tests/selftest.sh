@@ -56,7 +56,7 @@ EOF
 	export SCV_GETPROP=$STUBS/getprop SCV_PM=$STUBS/pm
 	export SCV_NS_MODE=direct SCV_WAIT_INTERVAL=0 SCV_STEADY_INTERVAL=0 SCV_SLOW_INTERVAL=0
 	export SCV_MAX_WAIT=1 SCV_MAX_CYCLES=1 SCV_MAX_APPLY_FAIL=2 SCV_CONTROL_TRIES=1
-	unset STUB_INO_BUMP_AFTER STUB_BUMP_BEFORE_APPLY STUB_REMOVE_AFTER STUB_REMOVE_PATH STUB_CLEAR_JUMP STUB_PM_RC STUB_PM_GARBAGE
+	unset STUB_INO_BUMP_AFTER STUB_BUMP_BEFORE_APPLY STUB_REMOVE_AFTER STUB_REMOVE_PATH STUB_CLEAR_JUMP STUB_PM_RC STUB_PM_GARBAGE STUB_CHILD_FAIL_AFTER STUB_CHILD_CHANGE_AFTER STUB_CHILD_PKGS
 }
 
 add_user() { printf 'UserInfo{%s:Owner:c13} running\n' "$1" >>"$D/users"; }
@@ -99,7 +99,7 @@ run_sup
 eq "dual: exit" "$RC" 0
 eq "dual: published" "$(state state)" PUBLISHED
 eq "dual: count" "$(state count)" 8
-eq "dual: applied lines" "$(grep -c . "$D/applied" 2>/dev/null)" 8
+eq "dual: applied lines" "$(grep -c '^root' "$D/applied" 2>/dev/null)" 8
 u0=$(grep -F '/data/media/0/Android/data' "$D/applied")
 case "$u0" in *"10055-10055"*) ok "dual: user0 object allows its PM uid" ;; *) bad "dual: user0 object allows its PM uid" ;; esac
 case "$u0" in *"90055-90055"*) ok "dual: union keeps the other verified PM uid" ;; *) bad "dual: union keeps the other verified PM uid" ;; esac
@@ -376,22 +376,13 @@ fixture_single
 export STUB_REMOVE_AFTER=1 STUB_REMOVE_PATH=/data/media/0/Android/data
 export SCV_MAX_CYCLES=2
 run_sup
-eq "clear: released after object loss" "$(state count)" 0
+eq "guard: roots remain after object loss" "$(cat "$D/count")" 4
 case "$(state state)" in
-WAITING) ok "clear: back to waiting" ;;
+GUARDED) ok "clear: protected failure state" ;;
 *) bad "clear: back to waiting ($(state state))" ;;
 esac
-file_has "clear: used own generation" "$D/calls/all" "clear 2"
+file_has "clear: used own generation" "$D/calls/all" "apply gen=2"
 
-new_case clear_jump
-fixture_single
-export STUB_REMOVE_AFTER=1 STUB_REMOVE_PATH=/data/media/0/Android/data STUB_CLEAR_JUMP=2
-export SCV_MAX_CYCLES=2
-run_sup
-eq "clear_jump: unexpected readback stops" "$RC" 5
-eq "clear_jump: state" "$(state state)" CLEAR_FAILED
-
-# ------------------------------------------------------------ stop fallback --
 new_case stop
 fixture_single
 run_sup
@@ -410,76 +401,55 @@ fixture_single
 sh "$SCVCTL" stop >"$D/stop.out" 2>&1; rc=$?
 eq "stop: nothing published is a no-op" "$rc" 0
 
-# ------------------------------------------------------------- post-fs-data --
-postfs_case() {
-	new_case "$1"
-	: >"$D/resetprop.log"
-	export SCV_RESETPROP=$STUBS/resetprop
-}
-postfs_case prop_set
-: >"$D/prop"
-export STUB_PROP_ABSENT=1
-sh "$POSTFS" >"$D/post.out" 2>&1
-eq "prop: absent key set" "$(cat "$D/prop" 2>/dev/null)" true
-file_has "prop: resetprop -n used" "$D/resetprop.log" "-n persist.sys.vold_app_data_isolation_enabled true"
-eq "prop: owned" "$(sed -n 's/^owned=//p' "$D/state/prop.state")" 1
-eq "prop: recorded absence" "$(sed -n 's/^had=//p' "$D/state/prop.state")" 0
-unset STUB_PROP_ABSENT
+# Healthy cycles renew even unchanged identities; PM changes never publish.
+new_case lease_refresh
+fixture_single
+export SCV_MAX_CYCLES=2
+run_sup
+eq "lease: unchanged full PM snapshot renewed" "$(cat "$D/gen")" 3
 
-postfs_case prop_present
-printf 'true' >"$D/prop"
-sh "$POSTFS" >"$D/post.out" 2>&1
-eq "prop: existing true left alone" "$(sed -n 's/^state=//p' "$D/state/prop.state")" present
-eq "prop: not owned" "$(sed -n 's/^owned=//p' "$D/state/prop.state")" 0
-[ ! -s "$D/resetprop.log" ] && ok "prop: no write when already true" || bad "prop: no write when already true"
+new_case pm_changed
+fixture_single
+export STUB_CHILD_CHANGE_AFTER=1
+run_sup
+eq "PM: inconsistent snapshots wait" "$(state reason)" PM_SNAPSHOT_CHANGED
+file_absent "PM: inconsistent table never published" "$D/applied"
 
-postfs_case prop_foreign
-printf '1' >"$D/prop"
-sh "$POSTFS" >"$D/post.out" 2>&1
-eq "prop: foreign value refused" "$(sed -n 's/^state=//p' "$D/state/prop.state")" foreign-value
-eq "prop: foreign value untouched" "$(cat "$D/prop")" 1
-[ ! -s "$D/resetprop.log" ] && ok "prop: no write on foreign value" || bad "prop: no write on foreign value"
+new_case pm_reinstalled
+fixture_single
+export SCV_MAX_CYCLES=2 STUB_CHILD_CHANGE_AFTER=2
+run_sup
+file_has "PM: new installed identity replaces old map" "$D/applied" "com.example.new"
+file_lacks "PM: uninstalled identity removed" "$D/applied" "com.example.owner"
 
-postfs_case prop_false
-printf 'false' >"$D/prop"
-sh "$POSTFS" >"$D/post.out" 2>&1
-eq "prop: explicit false taken over" "$(sed -n 's/^state=//p' "$D/state/prop.state")" set
-eq "prop: false recorded as original" "$(sed -n 's/^had=//p' "$D/state/prop.state")" 1
-eq "prop: false value recorded" "$(sed -n 's/^before=//p' "$D/state/prop.state")" false
-eq "prop: false became true" "$(cat "$D/prop")" true
-SCV_STATE_DIR="$D/state" SCV_GETPROP="$STUBS/getprop" SCV_RESETPROP="$STUBS/resetprop" sh "$REPO/module/bin/scv-prop.sh" restore >/dev/null 2>&1
-eq "prop: cleanup restores false" "$(cat "$D/prop")" false
+new_case pm_revoked
+fixture_single
+export SCV_MAX_CYCLES=2 STUB_CHILD_FAIL_AFTER=2
+run_sup
+eq "PM: roots retained on later query failure" "$(cat "$D/count")" 4
+eq "PM: child authorizations revoked" "$(grep -c '^package' "$D/applied")" 0
+eq "PM: supervisor reports guarded" "$(state state)" GUARDED
 
-postfs_case prop_twice
-: >"$D/prop"
-export STUB_PROP_ABSENT=1
-sh "$POSTFS" >"$D/post.out" 2>&1
-sh "$POSTFS" >"$D/post2.out" 2>&1
-eq "prop: repeat keeps ownership" "$(sed -n 's/^owned=//p' "$D/state/prop.state")" 1
-eq "prop: repeat writes only once" "$(grep -c -- '-n persist' "$D/resetprop.log")" 1
-unset STUB_PROP_ABSENT
+new_case shared_uid
+fixture_single
+printf '0:com.example.one:10001\n0:com.example.two:10001\n' >"$D/children"
+export STUB_CHILD_PKGS=$D/children
+run_sup
+eq "shared UID: both names are authorized" "$(grep -c '^package' "$D/applied")" 2
+file_has "shared UID: own full UID is preserved" "$D/applied" "com.example.two"
 
-postfs_case prop_empty_present
-: >"$D/prop"
-sh "$POSTFS" >"$D/post.out" 2>&1
-eq "prop: present-empty refused" "$(sed -n 's/^state=//p' "$D/state/prop.state")" foreign-value
+new_case conflicting_identity
+fixture_single
+printf '0:com.example.one:10001\n0:com.example.one:10002\n' >"$D/children"
+export STUB_CHILD_PKGS=$D/children
+run_sup
+eq "PM: duplicate package rejected" "$(state reason)" PM_SNAPSHOT_INVALID
+file_absent "PM: duplicate never published" "$D/applied"
 
-postfs_case prop_legacy
-export STUB_PROP_ABSENT=1
-mkdir -p "$D/legacy-module"
-: >"$D/prop"
+# V2 never activates native isolation, irrespective of original key value.
+new_case v2_no_property
 sh "$POSTFS" >"$D/post.out" 2>&1
-eq "prop: legacy module blocks activation" "$(sed -n 's/^state=//p' "$D/state/prop.state")" legacy-module
-eq "prop: legacy leaves key absent" "$(cat "$D/prop" 2>/dev/null)" ""
-unset STUB_PROP_ABSENT
-
-postfs_case prop_nocontrol
-export STUB_PROP_ABSENT=1
-rm -f "$D/control"
-sh "$POSTFS" >"$D/post.out" 2>&1
-eq "prop: absent control recorded" "$(sed -n 's/^state=//p' "$D/state/prop.state")" unsupported
-[ -s "$D/resetprop.log" ] && bad "prop: no write without control" || ok "prop: no write without control"
-unset STUB_PROP_ABSENT
+[ ! -s "$D/resetprop.log" ] && ok "v2: no property mutation" || bad "v2: no property mutation"
 
 # ---------------------------------------------------------------- uninstall --
 new_case uninstall

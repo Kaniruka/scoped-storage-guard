@@ -40,6 +40,7 @@ test: host
 	bash tests/u32.sh
 	bash tests/resolver.sh
 	bash tests/host-svreg.sh
+	bash tests/v2-helper.sh
 
 module: arm64 host
 	bash build.sh

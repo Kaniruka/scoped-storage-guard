@@ -79,7 +79,7 @@ run_case() { # label shell argv...
 	eq "$LABEL: fuse objects" "$(field_of fuse "$RES")" 4
 	eq "$LABEL: users" "$(field_of users "$RES")" 2
 	eq "$LABEL: provider uids" "$(field_of provider_uids "$RES")" 2
-	eq "$LABEL: snapshot lines" "$(grep -c . "$STATE/snapshot" 2>/dev/null)" 8
+	eq "$LABEL: snapshot lines" "$(grep -c '^root' "$STATE/snapshot" 2>/dev/null)" 8
 	has "$(cat "$STATE/snapshot" 2>/dev/null)" "/mnt/user/0/emulated/9/Android/data" \
 		"$LABEL: cross-namespace FUSE view kept"
 	has "$(cat "$STATE/snapshot" 2>/dev/null)" "10055-10055,90055-90055" \

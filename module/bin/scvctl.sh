@@ -9,9 +9,7 @@ MODDIR=$(dirname "$SELF_DIR")
 STATE_DIR=${SCV_STATE_DIR:-/data/adb/scoped-storage-guard}
 CONTROL=${SCV_CONTROL:-/sys/kernel/security/scoped_visibility/control}
 SVCTL=${SCV_SVCTL:-$SELF_DIR/svctl}
-GETPROP=${SCV_GETPROP:-getprop}
 STATUS=$STATE_DIR/status
-RESOLVE=$STATE_DIR/resolve
 DETAIL=$STATE_DIR/resolve.detail
 DIAG=$STATE_DIR/diagnostics
 LOCKOWNER=$STATE_DIR/lock/owner
@@ -74,12 +72,12 @@ do_stop() {
 		return 4
 	fi
 	[ -e "$CONTROL" ] || { echo "control node absent; nothing to release"; return 0; }
-	cur=$("$SVCTL" status 2>/dev/null | sed -n 's/^generation=\([0-9][0-9]*\).*/\1/p' | head -n1)
+	cur=$("$SVCTL" --control "$CONTROL" status 2>/dev/null | sed -n 's/^generation=\([0-9][0-9]*\).*/\1/p' | head -n1)
 	if [ "$cur" != "$st_gen" ]; then
 		echo "refused: current generation $cur is not ours ($st_gen); external policy untouched"
 		return 4
 	fi
-	"$SVCTL" clear "$st_gen" >/dev/null 2>&1 || { echo "clear failed for own generation $st_gen"; return 5; }
+	"$SVCTL" --control "$CONTROL" clear "$st_gen" >/dev/null 2>&1 || { echo "clear failed for own generation $st_gen"; return 5; }
 	restore_prop
 	echo "released own generation $st_gen"
 	return 0
@@ -104,12 +102,11 @@ show_diagnostics() {
 
 case "$CMD" in
 status)
-	grep -E '^(state|reason|generation|count|users|isolate|namespace|boot_id)=' "$STATUS" 2>/dev/null ||
+	grep -E '^(state|reason|generation|count|users|enforcement|namespace|boot_id)=' "$STATUS" 2>/dev/null ||
 		echo "no state file (module never started this boot)"
-	echo "isolation_key=$($GETPROP persist.sys.vold_app_data_isolation_enabled 2>/dev/null)"
 	if [ -e "$CONTROL" ]; then
 		printf 'control: '
-		"$SVCTL" status 2>&1 | head -n1
+		"$SVCTL" --control "$CONTROL" status 2>&1 | head -n1
 	else
 		echo "control: absent"
 	fi
@@ -142,7 +139,6 @@ disable)
 	: >"$MODDIR/disable" 2>/dev/null
 	echo "wrote disable marker; releasing own state"
 	do_stop
-	echo "reboot restores the cached system_server isolation gate"
 	;;
 *)
 	echo "usage: $0 status|diagnostics on|off|show|stop|disable" >&2

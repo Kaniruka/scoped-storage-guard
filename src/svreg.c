@@ -149,7 +149,7 @@ static void svreg_usage(const char *program)
 		"       %s [--control PATH] [--fs-allow LIST] apply EXPECTED_GENERATION CONFIG\n"
 		"       %s DIRECTORY...            (same as inspect)\n"
 		"\n"
-		"CONFIG: directory<TAB>min-max[,min-max...] per line. Ranges are always\n"
+		"CONFIG v2: root<TAB>directory<TAB>map_id<TAB>ranges; package<TAB>map_id<TAB>uid<TAB>name. Ranges are always\n"
 		"operator input. inspect never opens the control node. apply sends exactly\n"
 		"one REPLACE with the caller's expected generation and never adopts a\n"
 		"newer one; exit 3 means the generation moved.\n",
@@ -276,33 +276,41 @@ static int inspect_paths(int count, char **paths)
 	return rejected ? SVREG_REJECTED : SVREG_OK;
 }
 
-static int valid_info(const struct sv_info *info)
+static int valid_info(const struct sv_info_v2 *info)
 {
-	return info->version == SV_VERSION && !info->flags && !info->reserved &&
-	       info->nr_entries <= SV_MAX_ENTRIES;
+	return info->version == SV_VERSION_V2 &&
+	       !(info->flags & ~SV_INFO_F_CHILD_AWARE) &&
+	       info->nr_entries <= SV_MAX_ENTRIES &&
+	       info->nr_packages <= SV_MAX_PACKAGES;
 }
 
 static int apply_snapshot(const char *control_path, const char *config_path,
 			  uint64_t generation)
 {
-	struct sv_snapshot snapshot;
-	struct sv_info before, after;
+	struct sv_policy_v2 *policy;
+	struct sv_snapshot_v2 *snapshot;
+	struct sv_info_v2 before, after;
 	dev_t dev[SV_MAX_ENTRIES];
 	ino_t ino[SV_MAX_ENTRIES];
 	char err[512];
 	int control = -1, rc, i, j, count;
 
-	memset(&snapshot, 0, sizeof(snapshot));
-	snapshot.version = SV_VERSION;
-	snapshot.expected_generation = generation;
+	policy = calloc(1, sizeof(*policy));
+	if (!policy)
+		return SVREG_CONTROL;
+	snapshot = &policy->header;
+	snapshot->version = SV_VERSION_V2;
+	snapshot->expected_generation = generation;
+	snapshot->lease_ms = 60000;
 
 	control = open(control_path, O_RDWR | O_CLOEXEC);
 	if (control < 0) {
 		fprintf(stderr, "control %s: %s\n", control_path,
 			strerror(errno));
+		free(policy);
 		return SVREG_CONTROL;
 	}
-	if (ioctl(control, SV_IOC_GET_INFO, &before)) {
+	if (ioctl(control, SV_IOC_GET_INFO_V2, &before)) {
 		perror("GET_INFO");
 		rc = SVREG_CONTROL;
 		goto out;
@@ -323,19 +331,19 @@ static int apply_snapshot(const char *control_path, const char *config_path,
 		rc = SVREG_STALE;
 		goto out;
 	}
-	if (sv_load_snapshot(config_path, &snapshot, err, sizeof(err))) {
+	if (sv_load_policy_v2(config_path, policy, err, sizeof(err))) {
 		fprintf(stderr, "%s\n", err);
 		rc = SVREG_REJECTED;
 		goto out;
 	}
-	count = (int)snapshot.nr_entries;
+	count = (int)snapshot->nr_roots;
 	if (!count)
 		printf("note: empty snapshot publishes an empty policy\n");
 	for (i = 0; i < count; i++) {
 		struct stat st;
 		struct statfs sf;
 
-		if (fstat(snapshot.entries[i].fd, &st)) {
+		if (fstat(policy->roots[i].fd, &st)) {
 			fprintf(stderr, "entry %d: fstat: %s\n", i,
 				strerror(errno));
 			rc = SVREG_REJECTED;
@@ -346,7 +354,7 @@ static int apply_snapshot(const char *control_path, const char *config_path,
 			rc = SVREG_REJECTED;
 			goto out;
 		}
-		if (fstatfs(snapshot.entries[i].fd, &sf)) {
+		if (fstatfs(policy->roots[i].fd, &sf)) {
 			fprintf(stderr, "entry %d: fstatfs: %s\n", i,
 				strerror(errno));
 			rc = SVREG_REJECTED;
@@ -373,9 +381,9 @@ static int apply_snapshot(const char *control_path, const char *config_path,
 		       i, major(dev[i]), minor(dev[i]),
 		       (unsigned long long)ino[i],
 		       fs_name((long)sf.f_type),
-		       snapshot.entries[i].nr_ranges);
+		       policy->roots[i].nr_ranges);
 	}
-	if (ioctl(control, SV_IOC_REPLACE, &snapshot)) {
+	if (ioctl(control, SV_IOC_REPLACE_V2, snapshot)) {
 		if (errno == EAGAIN) {
 			fprintf(stderr, "REPLACE: generation changed under us; "
 				"not retried, re-inspect and decide again\n");
@@ -386,12 +394,14 @@ static int apply_snapshot(const char *control_path, const char *config_path,
 		}
 		goto out;
 	}
-	if (ioctl(control, SV_IOC_GET_INFO, &after)) {
+	if (ioctl(control, SV_IOC_GET_INFO_V2, &after)) {
 		perror("GET_INFO readback");
 		rc = SVREG_CONTROL;
 		goto out;
 	}
-	if (!valid_info(&after) || (int)after.nr_entries != count) {
+	if (!valid_info(&after) || !(after.flags & SV_INFO_F_CHILD_AWARE) ||
+	    after.nr_packages != snapshot->nr_packages ||
+	    (int)after.nr_entries != count) {
 		fprintf(stderr, "readback mismatch: count %u != %d\n",
 			after.nr_entries, count);
 		rc = SVREG_READBACK;
@@ -419,10 +429,11 @@ static int apply_snapshot(const char *control_path, const char *config_path,
 	       (unsigned long long)after.generation, after.nr_entries);
 	rc = SVREG_OK;
 out:
-	for (i = 0; i < (int)snapshot.nr_entries; i++)
-		close(snapshot.entries[i].fd);
+	for (i = 0; i < (int)snapshot->nr_roots; i++)
+		close(policy->roots[i].fd);
 	if (control >= 0)
 		close(control);
+	free(policy);
 	return rc;
 }
 

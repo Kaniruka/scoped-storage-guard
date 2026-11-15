@@ -33,10 +33,10 @@ elif [ "$st_pub" != 1 ]; then
 elif [ ! -e "$CONTROL" ]; then
 	say "control node absent; nothing to release"
 else
-	cur=$("$SVCTL" status 2>/dev/null | sed -n 's/^generation=\([0-9][0-9]*\).*/\1/p' | head -n1)
+	cur=$("$SVCTL" --control "$CONTROL" status 2>/dev/null | sed -n 's/^generation=\([0-9][0-9]*\).*/\1/p' | head -n1)
 	if [ "$cur" != "$st_gen" ]; then
 		say "generation $cur is not ours ($st_gen); external policy untouched"
-	elif "$SVCTL" clear "$st_gen" >/dev/null 2>&1; then
+	elif "$SVCTL" --control "$CONTROL" clear "$st_gen" >/dev/null 2>&1; then
 		say "released own generation $st_gen"
 	else
 		say "clear failed for own generation $st_gen"

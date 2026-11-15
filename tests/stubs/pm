@@ -11,7 +11,23 @@ case "$1 $2" in
 		exit 0
 	fi
 	uid=$5
-	pkg=$6
+	pkg=${6:-}
+	if [ -z "$pkg" ]; then
+     n=0
+     [ ! -f "$STUB_CALLS/pm.n" ] || n=$(cat "$STUB_CALLS/pm.n")
+     n=$((n + 1)); echo "$n" >"$STUB_CALLS/pm.n"
+     if [ -n "${STUB_CHILD_FAIL_AFTER:-}" ] && [ "$n" -gt "$STUB_CHILD_FAIL_AFTER" ]; then exit 1; fi
+     if [ -n "${STUB_CHILD_CHANGE_AFTER:-}" ] && [ "$n" -gt "$STUB_CHILD_CHANGE_AFTER" ]; then
+       printf 'package:com.example.new uid:%s\n' "$((uid * 100000 + 10002))"
+       exit 0
+     fi
+	 if [ -n "${STUB_CHILD_PKGS:-}" ]; then
+	  awk -F: -v u="$uid" '$1==u {print "package:" $2 " uid:" $3}' "$STUB_CHILD_PKGS"
+	 else
+	  printf 'package:com.example.owner uid:%s\n' "$((uid * 100000 + 10001))"
+	 fi
+	 exit 0
+	fi
 	line=$(grep -F -- "$uid:$pkg:" "$STUB_PKGS" 2>/dev/null | head -n1)
 	[ -n "$line" ] && printf 'package:%s uid:%s\n' "$pkg" "$(printf '%s' "$line" | cut -d: -f3)"
 	;;

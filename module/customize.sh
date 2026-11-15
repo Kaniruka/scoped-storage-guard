@@ -41,7 +41,7 @@ esac
 
 CONTROL=${SCV_CONTROL:-/sys/kernel/security/scoped_visibility/control}
 [ -r "$CONTROL" ] || abort "! scoped_visibility control node is absent: flash the required patched kernel and boot it before installing this module"
-"$MODPATH/bin/svctl" status >/dev/null 2>&1 || abort "! control node does not answer the expected UAPI (SV_VERSION 1); install only with the matching kernel"
+"$MODPATH/bin/svctl" --control "$CONTROL" status >/dev/null 2>&1 || abort "! control node does not answer the expected UAPI (SV_VERSION_V2 2); install only with the matching kernel"
 
 LEGACY=${SCV_LEGACY_MODULE:-/data/adb/modules/gki_scoped_visibility}
 if [ -d "$LEGACY" ] && [ ! -e "$LEGACY/disable" ] && [ ! -e "$LEGACY/remove" ]; then
@@ -61,5 +61,5 @@ set_perm "$MODPATH/config/scv.conf" 0 0 0600
 set_perm "$MODPATH/module.prop" 0 0 0644
 set_perm "$MODPATH/skip_mount" 0 0 0644
 
-ui_print "- interface verified; the isolation key is set at the next post-fs-data only if that boot still exposes it"
+ui_print "- interface verified; kernel v2 child authorization is required; no ROM property is activated"
 ui_print "- policy: config/scv.conf (root-only); status: bin/scvctl.sh status"

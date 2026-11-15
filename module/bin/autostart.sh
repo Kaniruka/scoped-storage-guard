@@ -16,7 +16,6 @@ CONTROL=${SCV_CONTROL:-/sys/kernel/security/scoped_visibility/control}
 SVREG=${SCV_SVREG:-$SELF_DIR/svreg}
 SVCTL=${SCV_SVCTL:-$SELF_DIR/svctl}
 RESOLVER=${SCV_RESOLVER:-$SELF_DIR/scv-resolve.sh}
-GETPROP=${SCV_GETPROP:-getprop}
 PM=${SCV_PM:-pm}
 NS_MODE=${SCV_NS_MODE:-}
 NS_PREFIX=${SCV_NS:-}
@@ -48,10 +47,8 @@ REASON=
 PUBLISHED=0
 EXPECT_GEN=
 SAVED_GEN=
-SAVED_FP=
-CFG_SAVED=
 FS_ALLOW=fuse,f2fs,ext4
-ISO=unknown
+ISO=kernel-v2
 FAILS=0
 CYCLES=0
 WAITED=0
@@ -63,7 +60,7 @@ RC=1
 log_line() {
 	printf '%s boot=%s %s gen=%s count=%s\n' \
 		"$(date +%Y-%m-%dT%H:%M:%S 2>/dev/null)" "$BOOT_ID" "$*" \
-		"${SAVED_GEN:--}" "$(grep -c . "$SNAPSHOT" 2>/dev/null)" \
+		"${SAVED_GEN:--}" "$(grep -c '^root' "$SNAPSHOT" 2>/dev/null)" \
 		>>"$LOG" 2>/dev/null
 	[ -f "$LOG" ] || return 0
 	sz=$(wc -c <"$LOG" 2>/dev/null)
@@ -74,14 +71,14 @@ log_line() {
 }
 
 set_state() { # state reason
-	[ -n "$STATE" ] && [ "$1" = "$STATE" ] && [ "$2" = "$REASON" ] && return 0
 	STATE=$1
 	REASON=$2
 	tmp=$STATUS.tmp.$$
 	gen=-
 	[ -n "$SAVED_GEN" ] && gen=$SAVED_GEN
-	cnt=$(grep -c . "$SNAPSHOT" 2>/dev/null)
+	cnt=$(grep -c '^root' "$SNAPSHOT" 2>/dev/null)
 	[ -n "$cnt" ] || cnt=0
+	[ "$PUBLISHED" = 0 ] || cnt=$(grep -c '^root' "$STATE_DIR/guard.snapshot" 2>/dev/null)
 	{
 		printf 'module_id=scoped_storage_guard\n'
 		printf 'state=%s\n' "$STATE"
@@ -91,7 +88,7 @@ set_state() { # state reason
 		printf 'expected_generation=%s\n' "$EXPECT_GEN"
 		printf 'count=%s\n' "$cnt"
 		printf 'users=%s\n' "${RES_USERS:-0}"
-		printf 'isolate=%s\n' "$ISO"
+		printf 'enforcement=%s\n' "$ISO"
 		printf 'namespace=%s\n' "$NS_MODE"
 		printf 'boot_id=%s\n' "$BOOT_ID"
 		printf 'pid=%s\n' "$$"
@@ -175,30 +172,16 @@ ns_run() {
 	fi
 }
 
-prop_ok() {
-	val=$("$GETPROP" persist.sys.vold_app_data_isolation_enabled 2>/dev/null)
-	if [ "$val" = true ]; then
-		ISO=ok
-		return 0
-	fi
-	if [ -n "$val" ]; then
-		ISO=other
-	else
-		ISO=absent
-	fi
-	return 1
-}
-
 do_resolve() {
+	rm -f "$RESOLVE" "$SNAPSHOT"
 	diag=0
 	[ -f "$DIAG" ] && diag=1
 	SCV_STATE_DIR="$STATE_DIR" SCV_CONFIG="$CONFIG" SCV_CONTROL="$CONTROL" \
-		SCV_SVREG="$SVREG" SCV_PM="$PM" SCV_GETPROP="$GETPROP" \
+		SCV_SVREG="$SVREG" SCV_PM="$PM" \
 		SCV_NS_MODE="$NS_MODE" SCV_NS="$NS_PREFIX" SCV_DIAG="$diag" \
 		sh "$RESOLVER" >/dev/null 2>&1
 	RES_STATUS=$(sed -n 's/^status=//p' "$RESOLVE" 2>/dev/null | head -n1)
 	RES_REASON=$(sed -n 's/^reason=//p' "$RESOLVE" 2>/dev/null | head -n1)
-	RES_FP=$(sed -n 's/^fp=//p' "$RESOLVE" 2>/dev/null | head -n1)
 	RES_USERS=$(sed -n 's/^users=//p' "$RESOLVE" 2>/dev/null | head -n1)
 	fs=$(sed -n 's/^fs_allow=//p' "$RESOLVE" 2>/dev/null | head -n1)
 	[ -n "$fs" ] && FS_ALLOW=$fs
@@ -207,7 +190,7 @@ do_resolve() {
 }
 
 read_status() {
-	out=$(ns_run "$SVCTL" status 2>/dev/null)
+	out=$(ns_run "$SVCTL" --control "$CONTROL" status 2>/dev/null)
 	[ -n "$out" ] || return 1
 	C_GEN=$(printf '%s\n' "$out" | sed -n 's/^generation=\([0-9][0-9]*\).*/\1/p' | head -n1)
 	C_COUNT=$(printf '%s\n' "$out" | sed -n 's/.*count=\([0-9][0-9]*\).*/\1/p' | head -n1)
@@ -217,10 +200,35 @@ read_status() {
 }
 
 do_apply() {
-	out=$(ns_run "$SVREG" --fs-allow "$FS_ALLOW" apply "$1" "$SNAPSHOT" 2>&1)
+	out=$(ns_run "$SVREG" --control "$CONTROL" --fs-allow "$FS_ALLOW" apply "$1" "$SNAPSHOT" 2>&1)
 	RC=$?
 	NEW_GEN=$(printf '%s\n' "$out" | sed -n 's/^PUBLISHED generation=\([0-9][0-9]*\).*/\1/p' | tail -n1)
 	return 0
+}
+
+save_guard() {
+ grep '^root' "$SNAPSHOT" >"$STATE_DIR/.guard.$$" || return 1
+ chmod 600 "$STATE_DIR/.guard.$$"
+ mv -f "$STATE_DIR/.guard.$$" "$STATE_DIR/guard.snapshot"
+}
+
+revoke_children() {
+ [ -s "$STATE_DIR/guard.snapshot" ] || return 1
+ if ! read_status || [ "$C_GEN" != "$SAVED_GEN" ]; then
+  set_state CONFLICT revoke-generation-unverified
+  drop_lock
+  exit 4
+ fi
+ out=$(ns_run "$SVREG" --control "$CONTROL" --fs-allow "$FS_ALLOW" apply "$SAVED_GEN" "$STATE_DIR/guard.snapshot" 2>&1)
+ rc=$?
+ new=$(printf '%s\n' "$out" | sed -n 's/^PUBLISHED generation=\([0-9][0-9]*\).*/\1/p' | tail -n1)
+ if [ "$rc" = 0 ] && [ -n "$new" ]; then
+  SAVED_GEN=$new
+  EXPECT_GEN=$new
+  set_state GUARDED "$1"
+ else
+  set_state LEASE_EXPIRING "revoke-failed:$rc"
+ fi
 }
 
 clear_own() {
@@ -238,7 +246,7 @@ clear_own() {
 		drop_lock
 		exit 4
 	fi
-	ns_run "$SVCTL" clear "$SAVED_GEN" >/dev/null 2>&1
+	ns_run "$SVCTL" --control "$CONTROL" clear "$SAVED_GEN" >/dev/null 2>&1
 	rc=$?
 	if [ "$rc" -ne 0 ]; then
 		set_state CLEAR_FAILED "clear-exit:$rc"
@@ -248,7 +256,6 @@ clear_own() {
 	CLEARED_FROM=$SAVED_GEN
 	PUBLISHED=0
 	SAVED_GEN=
-	SAVED_FP=
 	# The only acceptable post-clear generation is our own + 1; a different
 	# value means another writer or an unexpected interface and is never
 	# adopted as the next expected generation.
@@ -288,7 +295,6 @@ fix_legacy_perms() {
 	chmod 700 "$LEGACY_STATE" 2>/dev/null
 	chmod -R go-rwx "$LEGACY_STATE" 2>/dev/null
 	log_line "legacy-state-permissions-tightened"
-	LEGACY_FIXED=1
 }
 
 # ------------------------------------------------------------------ main ----
@@ -298,7 +304,7 @@ mkdir -p "$STATE_DIR" 2>/dev/null || exit 1
 chmod 700 "$STATE_DIR" 2>/dev/null
 # umask only protects new files; an inherited 0666 log/status must be fixed.
 for f in "$STATUS" "$LOG" "$RESOLVE" "$RESOLVE.detail" "$SNAPSHOT" "$DIAG" \
-	"$STATE_DIR/prop.state" "$STATE_DIR/status.prevboot" "$CONFIG"; do
+	"$STATE_DIR/guard.snapshot" "$STATE_DIR/prop.state" "$STATE_DIR/status.prevboot" "$CONFIG"; do
 	[ -e "$f" ] && chmod 600 "$f" 2>/dev/null
 done
 fix_legacy_perms
@@ -322,7 +328,7 @@ done
 [ -f "$CONFIG" ] || { set_state CONFIG_REQUIRED config-missing; drop_lock; exit 1; }
 
 if ! detect_ns; then
-	ISO=unknown
+	ISO=kernel-v2
 	set_state BLOCKED ns-unverified
 	drop_lock
 	exit 2
@@ -338,6 +344,12 @@ while [ ! -e "$CONTROL" ]; do
 	fi
 	sleep "$SLOW_INTERVAL"
 done
+
+if ! read_status; then
+ set_state UNSUPPORTED kernel-v2-required
+ drop_lock
+ exit 2
+fi
 
 while :; do
 	CYCLES=$((CYCLES + 1))
@@ -355,28 +367,24 @@ while :; do
 		exit 0
 	fi
 
-	if ! prop_ok; then
-		if [ "$PUBLISHED" -eq 1 ]; then
-			clear_own isolation-off
-		fi
-		set_state BLOCKED_ISOLATION isolate-$ISO
-		sleep "$WAIT_INTERVAL"
-		continue
-	fi
 
 	do_resolve
 	case "$RES_STATUS" in
 	ok) ;;
 	*)
 		if [ "$PUBLISHED" -eq 1 ]; then
-			clear_own "resolve-$RES_STATUS"
+			revoke_children "resolve-$RES_STATUS"
 		fi
 		case "$RES_STATUS" in
 		waiting)
-			set_state WAITING "$RES_REASON"
+			if [ "$PUBLISHED" = 1 ]; then
+			 [ "$STATE" = LEASE_EXPIRING ] || set_state GUARDED "$RES_REASON"
+			else set_state WAITING "$RES_REASON"; fi
 			;;
 		*)
-			set_state CONFIG_REQUIRED "$RES_REASON"
+			if [ "$PUBLISHED" = 1 ]; then
+			 [ "$STATE" = LEASE_EXPIRING ] || set_state GUARDED "$RES_REASON"
+			else set_state CONFIG_REQUIRED "$RES_REASON"; fi
 			;;
 		esac
 		if [ "$RES_STATUS" = waiting ] && [ "$WAITED" -lt "$MAX_WAIT" ]; then
@@ -413,7 +421,7 @@ while :; do
 			PUBLISHED=1
 			SAVED_GEN=$NEW_GEN
 			EXPECT_GEN=$SAVED_GEN
-			SAVED_FP=$RES_FP
+			save_guard
 			FAILS=0
 			set_state PUBLISHED "own-generation:$SAVED_GEN"
 			;;
@@ -444,33 +452,29 @@ while :; do
 			drop_lock
 			exit 4
 		fi
-		if [ "$RES_FP" != "$SAVED_FP" ]; then
-			do_apply "$EXPECT_GEN"
-			case "$RC" in
-			0)
-				SAVED_GEN=$NEW_GEN
-				EXPECT_GEN=$SAVED_GEN
-				SAVED_FP=$RES_FP
-				FAILS=0
-				set_state PUBLISHED "republished:$SAVED_GEN"
-				;;
-			3)
-				set_state CONFLICT republish-generation-moved
+		do_apply "$EXPECT_GEN"
+		case "$RC" in
+		0)
+			SAVED_GEN=$NEW_GEN
+			EXPECT_GEN=$SAVED_GEN
+			save_guard
+			FAILS=0
+			set_state PUBLISHED "republished:$SAVED_GEN"
+			;;
+		3)
+			set_state CONFLICT republish-generation-moved
+			drop_lock
+			exit 3
+			;;
+		*)
+			FAILS=$((FAILS + 1))
+			revoke_children "republish-exit:$RC"
+			if [ "$FAILS" -ge "$MAX_APPLY_FAIL" ]; then
 				drop_lock
-				exit 3
-				;;
-			*)
-				FAILS=$((FAILS + 1))
-				set_state FAILED "republish-exit:$RC"
-				if [ "$FAILS" -ge "$MAX_APPLY_FAIL" ]; then
-					drop_lock
-					exit 1
-				fi
-				;;
-			esac
-		else
-			set_state UNCHANGED "own-generation:$SAVED_GEN"
-		fi
+				exit 1
+			fi
+			;;
+		esac
 	fi
 
 	sleep "$STEADY_INTERVAL"

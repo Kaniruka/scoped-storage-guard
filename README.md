@@ -1,168 +1,161 @@
 # Scoped Storage Guard
 
-A KernelSU module that activates the standard native app-data isolation key at
-boot and publishes one verified `scoped_visibility` registry snapshot for the
-Android users that are actually running. It is not a complete storage privacy
-guarantee, not a FUSE-BPF implementation, and not a detection/integrity bypass.
+KernelSU module for `scoped_visibility` **v2 child-aware authorization**. It
+publishes verified Android/data and Android/obb roots plus PackageManager's
+package-name → complete UID mappings. It does not require a ROM's native tmpfs
+own/shared-UID view or `persist.sys.vold_app_data_isolation_enabled`, and never
+automatically activates that property.
 
 Repository: <https://github.com/Kaniruka/scoped-storage-guard>
 
 ## Required kernel
 
-* commit `881d7ebcd59d5736a1155e562da61367649322af`
-  ([commit](https://github.com/Kaniruka/android_gki_kernel_5.10_common/commit/881d7ebcd59d5736a1155e562da61367649322af),
-  [patch](https://github.com/Kaniruka/android_gki_kernel_5.10_common/commit/881d7ebcd59d5736a1155e562da61367649322af.patch))
-* `CONFIG_SECURITY_SCOPED_VISIBILITY=y`
-* `CONFIG_SECURITYFS=y` and a mounted securityfs (the control node lives at
-  `/sys/kernel/security/scoped_visibility/control`)
+* `CONFIG_SECURITY_SCOPED_VISIBILITY=y`, `CONFIG_SECURITYFS=y` and mounted
+  securityfs at `/sys/kernel/security/scoped_visibility/control`.
+* The matching v2 implementation: `SV_IOC_GET_INFO_V2`, `SV_IOC_REPLACE_V2`,
+  child-aware roots/maps and kernel authorization leases. The vendored
+  [UAPI](include/uapi/linux/scoped_visibility.h) defines the exact interface.
+* The old v1 kernel commit `881d7ebcd59d5736a1155e562da61367649322af` alone is
+  **insufficient**. Installer, supervisor and publication helpers reject v1
+  instead of silently publishing an incompatible policy.
 
-Merged kernel pull requests:
-[#2](https://github.com/Kaniruka/android_gki_kernel_5.10_common/pull/2) and
-[#3](https://github.com/Kaniruka/android_gki_kernel_5.10_common/pull/3).
+## Behavior
 
-The ROM must also implement the native tmpfs own/shared-UID view for app data
-(the behaviour behind `persist.sys.vold_app_data_isolation_enabled`). The
-presence of that property alone does **not** prove the ROM implements it, and
-this module does not claim support for every Android device or ROM.
+Root/system and every verified provider UID retain their explicit root ranges.
+Other UIDs can stat/search a registered root, but cannot enumerate it. A lookup
+of its immediate package child, including a nonexistent child, requires that
+exact name and the caller's complete UID in that root's user map. Packages with
+a shared UID can reach each other's package children. Cross-user identities
+remain distinct. Normal DAC/SELinux permissions still apply.
 
-## What it does
+The resolver requires all running covered users' lower and real FUSE objects
+for both Android/data and Android/obb. It accepts no partial snapshot. All roots
+for one user share that user's package map. It reads the complete trusted
+`pm list packages -U --user ID` table twice, checks canonical UIDs and package
+names, rejects empty/malformed/duplicate/conflicting responses, and requires the
+running-user list and provider responses to stay unchanged across resolution.
+No UID is invented from an appId. At most 32 roots and 4096 package rules.
 
-1. `post-fs-data.sh` checks this boot's control node and UAPI first. Only when
-   both answer does it set the standard key
-   `persist.sys.vold_app_data_isolation_enabled=true` in RAM (via
-   `resetprop -n`, no persistent store), and records that it owns the value for
-   this boot. An absent key is set; a key that already exists with any other
-   value is left untouched.
-2. `service.sh` starts the supervisor, which resolves every covered user,
-   requires the whole set to be complete, publishes exactly one snapshot over
-   an empty registry, and keeps it current.
-3. Cleanup (stop/disable/uninstall) deletes only a value this module set in the
-   same boot, and releases only a generation this module published.
+Each healthy supervisor cycle resolves the complete snapshot again and renews
+its 60000ms kernel lease, including when the table is unchanged. The default
+healthy interval is 20 seconds. On a later PM/storage/configuration failure it
+attempts to replace its own generation with the last verified roots and no
+child rules. This keeps the root ranges and denies ordinary app children. If
+replacement fails, the previous child authorization expires when its kernel
+lease runs out. Lease time uses monotonic time and does not include suspend.
+Root ranges do not expire. A foreign generation is never adopted or cleared.
 
-No module-specific property is defined. No public temporary file, no SELinux
-mode change, no mount/clone and no property write outside the standard key.
+`post-fs-data.sh` performs only compatibility cleanup of a previous release's
+same-boot owned RAM property record. Stop/disable/uninstall explicitly release
+only this module's recorded generation. No module-specific property, public
+temporary file, SELinux mode change, mount or clone is introduced.
 
 ## Configuration
 
-`config/scv.conf` (installed root-only at `<module>/config/scv.conf`):
+Installed root-only at `<module>/config/scv.conf`:
 
-```
-# user=auto covers every running user; repeat "user=<id>" for explicit users.
+```ini
 user=auto
-# Package whose real UID joins the allowlist; empty or off disables it.
 provider_package=com.android.providers.media.module
-# auto uses the reported UID; NUMBER must match it; off disables the lookup.
 provider_uid=auto
 allow_uid=0
 allow_uid=1000
-# Optional explicit per-kind FUSE mappings ({user} required); a configured
-# mapping must be a real FUSE object or publishing is blocked.
-# fuse_root=/mnt/user/v/emulated/{user}
-# fuse_data=/mnt/user/v/emulated/{user}/Android/data
-# fuse_obb=/mnt/user/v/emulated/{user}/Android/obb
+# fuse_root=/mnt/user/0/emulated/{user}
+# fuse_data=/mnt/user/0/emulated/{user}/Android/data
+# fuse_obb=/mnt/user/0/emulated/{user}/Android/obb
 fs_allow=fuse,f2fs,ext4
 ```
 
-* `user=auto` covers every user `pm list users` reports as running (strict
-  numeric parsing). Explicit users are verified against the same list.
-* The provider package is queried with `pm list packages -U` for **every
-  verified running user**, not only the coverage set. A central provider that
-  serves several users is therefore found once: `rc=0` without the package
-  for a user means "not installed for that user" and is skipped; a non-zero or
-  malformed response waits or refuses. At least one exact UID must be verified,
-  nothing is derived arithmetically, and an explicit `provider_uid=NUMBER`
-  must be present in that verified set. All verified provider UIDs and the
-  explicit `allow_uid` values form one sorted union applied to every object;
-  DAC/SELinux still decides what those processes may reach.
-* Completeness is tracked per `(user, Android/data|obb)`: each pair needs its
-  raw lower object and a real FUSE object. The direct FUSE view is
-  `/mnt/user/<user>/emulated/<user>/Android/<kind>`; if that one path is a
-  whole-F2FS overmount, only that kind falls back to the other running users'
-  namespaces (`/mnt/user/<v>/emulated/<u>/Android/<kind>`). Only real FUSE
-  objects are accepted, deduplicated by dev+ino; a non-FUSE alias never counts.
-* Explicit `fuse_root`/`fuse_data`/`fuse_obb` mappings (with `{user}`) name the
-  FUSE object for a user/kind when discovery has none. A configured mapping
-  must be real FUSE; missing blocks as `WAITING`, non-FUSE as
-  `CONFIG_REQUIRED` instead of falling back to an alias.
-* Every covered user must be complete for both kinds, otherwise nothing is
-  published (`WAITING` or `CONFIG_REQUIRED`; no partial snapshot). At most 32
-  objects.
+`user=auto` covers all users that `pm list users` reports as running. Repeated
+numeric `user=ID` lines select explicit running users. The provider is checked
+for every running user, including users outside the coverage set. A successful
+empty provider response means it is not installed for that user; at least one
+verified provider UID is required unless provider lookup is disabled.
+`provider_uid=NUMBER` must match a reported UID; `off` disables provider lookup.
+The sorted union of `allow_uid` and verified provider UIDs applies to every root.
+These identities bypass child authorization and must be configured carefully.
 
-## Install
+Each covered `(user, data|obb)` needs its raw lower object and a real FUSE
+object. Direct FUSE discovery uses
+`/mnt/user/<user>/emulated/<user>/Android/<kind>`. Missing/non-FUSE pairs can use
+another covered user's namespace
+`/mnt/user/<view-user>/emulated/<user>/Android/<kind>`. Objects are deduplicated
+by dev+ino. Explicit per-kind mappings require `{user}` and are authoritative:
+a missing path waits; a non-FUSE path requires configuration correction.
 
-Flash and boot a kernel with the required commit and configs **first**, then
-install the module. The installer checks arm64, the control node and the UAPI;
-it does not filter by device name. A still-enabled legacy module
-`gki_scoped_visibility` must be disabled and rebooted first (single writer).
+## Install and controls
 
-The install hook `customize.sh` is sourced into the KernelSU installer shell
-(`userspace/ksud/src/android/module/installer.sh`), so it never changes shell
-options: a `set -u` there leaks into the installer, whose own `set_perm` reads
-its fifth argument (`"$5"`, the SELinux context) unconditionally, so the
-install aborts with `5: parameter not set`. 1.1.1 fixed that; every variable in
-the hook is defaulted explicitly instead.
+Flash and boot the matching v2 kernel first, then install this module. Static
+helpers require arm64. An enabled legacy `gki_scoped_visibility` module must be
+disabled and rebooted first. The installer is sourced by KernelSU and never
+changes its caller's shell options.
 
-## Status and controls
-
-```
-<module>/bin/scvctl.sh status              # concise: state, reason, generation, count
-<module>/bin/scvctl.sh diagnostics show    # root only; per-path detail
-<module>/bin/scvctl.sh diagnostics on|off  # root only; enable detail for this boot
-<module>/bin/scvctl.sh stop                # release own generation + own RAM key
-<module>/bin/scvctl.sh disable             # disable marker + stop; reboot to revert
+```sh
+<module>/bin/scvctl.sh status
+<module>/bin/scvctl.sh diagnostics show
+<module>/bin/scvctl.sh diagnostics on|off
+<module>/bin/scvctl.sh stop
+<module>/bin/scvctl.sh disable
 ```
 
-State lives in `/data/adb/scoped-storage-guard` (0700, files 0600). Default
-status and logs carry no path list and no UID table.
+State lives in `/data/adb/scoped-storage-guard` (0700; files 0600). Default
+status/logs contain no path list or UID table. Control status reports
+`lease_remaining_ms`; zero means expired or no active v2 policy. A nonzero
+package count alone does not prove authorization is still live. `PUBLISHED` means a complete
+snapshot was accepted. `GUARDED` means roots remain with ordinary child rules
+revoked after resolution failed. `LEASE_EXPIRING` means revocation could not be
+confirmed and the previous child lease is allowed to expire. `WAITING` before
+the first publication does **not** mean roots are protected.
 
-## Limits
+## Limits and lifecycle
 
-* The securityfs node, the ioctl interface and the process/state files are
-  observable. This project claims reduced exposure and restricted read
-  permissions, not undetectability.
-* The kernel keeps its pinned `struct path` references by design.
-* Deeper bind mounts, already-open file descriptors, recreated inodes,
-  `Android/media` public semantics and FUSE daemon rename paths are not
-  covered.
-* The UID upper bound is decided as a decimal string, not arithmetically:
-  Android's `mksh` has 32-bit signed integers, so `[ 0 -ge 4294967295 ]` is
-  true there (the constant wraps to -1). 1.1.1 replaced the numeric bound and
-  rejects `4294967295` and above, plus non-canonical forms (`01000`, negatives).
-  For the same reason, record fields are split with `cut -d'|'` rather than
-  `${rec#*|}`: `mksh` treats a bare `|` in a pattern as alternation.
-* Version 1.0.0 of the predecessor module was verified on one Android 17
-  (API 37) / kernel 5.10.240 device. 1.1.1 was verified on the same device line
-  without reflashing its kernel: automatic publication `generation=1 count=8`
-  for two users, the 20-case joint matrix plus four core directions, owner-side
-  read/write controls, root-only state permissions (0700/0600) and `Enforcing`
-  SELinux. A still-locked secondary user keeps the supervisor in
-  `WAITING STORAGE_PENDING` and nothing is published until that user unlocks
-  and its raw lower objects exist -- that is the documented boundary, not a
-  module failure.
-* One device result does not generalize. The ROM must implement the native
-  tmpfs own/shared-UID view behind
-  `persist.sys.vold_app_data_isolation_enabled`; other devices and ROMs remain
-  unverified, and no coverage claim is made beyond the limits listed here.
+* PM collection and kernel publication are bounded asynchronous polling, not an
+  atomic PackageManager transaction. Uninstall/reinstall, UID reuse, install,
+  user changes and provider changes can race a matching double snapshot. A new
+  installation may temporarily lack access; a reused UID can temporarily inherit
+  the old UID's authorization until refresh/revocation. A stopped or failed
+  supervisor cannot renew child grants beyond the 60-second running-time lease.
+  Provider/root ranges are explicit exemptions and survive lease expiry.
+* Protection begins only after the first complete publication. Locked users,
+  missing storage, unsupported kernels or PM failures can prevent it. Existing
+  policy is not automatically adopted after supervisor restart; a foreign or
+  unowned nonempty registry produces a conflict requiring operator attention.
+* The kernel pins root paths. Recreated root inodes require rediscovery; deeper
+  bind mounts, already-open file descriptors and a task already below a protected
+  root are outside this boundary. Revocation does not revoke such descriptors.
+* Android/media public semantics and FUSE daemon rename paths are not covered.
+  Root enumeration is denied rather than filtered to an app's own names.
+* The control node, ioctl interface, process and root-only state remain
+  observable. This is not an integrity/detection bypass or a complete storage
+  privacy guarantee. On 2026-11-15 the matching v2 kernel passed 236 QEMU
+  native/compat checks across rootless and BakaSU configurations, then was
+  deployed with this module on one mayfly Android 17 device. Automatic renewal
+  covered two users, eight roots and 462 package records without the native
+  isolation property. A zero-capability ordinary app on F2FS could read,
+  create and rename within its own package while foreign and absent packages
+  both returned ENOENT. Via started with APK-install permission restored, and
+  MT opened a controlled ZIP and created its extraction cache successfully.
+  Test packages and temporary files were removed. This does not establish
+  all-ROM compatibility, secondary-user app operations, OBB writes, complete
+  hardware coverage, long-term stability or performance.
+* UID decimal bounds avoid wide integer arithmetic in Android mksh. Record
+  splitting uses `cut`, because mksh interprets bare `|` patterns differently.
 
 ## Build and test
 
-```
-make host        # host helpers
-make arm64       # static aarch64 helpers
-make test        # offline stub suite + installer contract + host checks
-make module      # build/scoped-storage-guard-<version>.zip + MANIFEST
-KERNEL_IMAGE=/path/to/Image make smoke   # optional QEMU control-node smoke
+```sh
+make host
+make arm64
+make test check
+make module
+KERNEL_IMAGE=/path/to/Image make smoke
 ```
 
-CI runs the same steps on ubuntu-24.04 with
-`gcc-aarch64-linux-gnu` and `shellcheck`. Sources are self-contained under
-`src/` and `include/uapi/`; no personal checkout path is referenced.
-
-The QEMU smoke test boots a caller-supplied kernel and checks only the control
-node and empty-policy path: `svctl status` exits 0, `svreg apply 0` on an
-empty snapshot exits 0 and reads back `generation=1 count=0`. FUSE/F2FS entry
-acceptance, user discovery, provider UID resolution and the state machine are
-covered by the offline stub suite, not by QEMU.
+The test suite covers resolution across dash/mksh/BusyBox, PM consistency and
+shared UIDs, lease renewal, error-time child revocation, installer contracts,
+UID bounds, and the real helpers' parser/UAPI boundary using an ioctl fixture.
+It does not substitute for a matching-kernel device test. Optional QEMU smoke
+checks the control node and an empty v2 publication only.
 
 ## License
 

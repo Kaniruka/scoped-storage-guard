@@ -149,3 +149,144 @@ out:
 		ret = -1;
 	return ret;
 }
+
+/* V2 records: root<TAB>directory<TAB>map_id<TAB>ranges, or
+ * package<TAB>map_id<TAB>full_uid<TAB>package.name. No inferred identities. */
+static int v2_u32(const char *text, uint32_t *out)
+{
+	const char *end = text;
+	uint64_t n;
+
+	if (!*text || (text[0] == '0' && text[1]) ||
+	    sv_parse_number(&end, UINT32_MAX - 1ULL, &n) || *end)
+		return -1;
+	*out = (uint32_t)n;
+	return 0;
+}
+
+static int package_name(const char *s)
+{
+	size_t i, len = strlen(s);
+
+	if (!len || len >= SV_PACKAGE_NAME_SIZE || s[0] == '.' ||
+	    s[len - 1] == '.')
+		return 0;
+	for (i = 0; i < len; i++) {
+		char c = s[i];
+
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		      (c >= '0' && c <= '9') || c == '_' || c == '.'))
+			return 0;
+		if (c == '.' && i && s[i - 1] == '.')
+			return 0;
+	}
+	return 1;
+}
+
+void sv_close_policy_v2(struct sv_policy_v2 *policy)
+{
+	unsigned int i;
+
+	for (i = 0; i < policy->header.nr_roots; i++)
+		close(policy->roots[i].fd);
+	policy->header.nr_roots = 0;
+}
+
+int sv_load_policy_v2(const char *path, struct sv_policy_v2 *policy,
+		      char *err, size_t errlen)
+{
+	FILE *f = fopen(path, "r");
+	char *line = NULL;
+	size_t cap = 0;
+	ssize_t len;
+	unsigned int lineno = 0, i;
+	int ret = -1;
+
+	if (!f) {
+		snprintf(err, errlen, "%s: %s", path, strerror(errno));
+		return -1;
+	}
+	while ((len = getline(&line, &cap, f)) >= 0) {
+		char *fields[4], *rest, *token;
+		int n = 0;
+		uint32_t map, uid;
+
+		lineno++;
+		if (memchr(line, 0, (size_t)len) || len > SV_LINE_LIMIT)
+			goto bad;
+		while (len && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+			line[--len] = 0;
+		if (!len || line[0] == '#')
+			continue;
+		rest = line;
+		while ((token = strsep(&rest, "\t")) != NULL) {
+			if (n == 4 || !*token)
+				goto bad;
+			fields[n++] = token;
+		}
+		if (n != 4)
+			goto bad;
+		if (!strcmp(fields[0], "root")) {
+			struct sv_root_v2 *root;
+			struct sv_entry entry;
+
+			if (policy->header.nr_roots == SV_MAX_ENTRIES ||
+			    v2_u32(fields[2], &map))
+				goto bad;
+			memset(&entry, 0, sizeof(entry));
+			if (sv_parse_ranges(fields[3], &entry))
+				goto bad;
+			root = &policy->roots[policy->header.nr_roots];
+			root->fd = open(fields[1], O_PATH | O_DIRECTORY |
+					O_NOFOLLOW | O_CLOEXEC);
+			if (root->fd < 0)
+				goto bad;
+			root->map_id = map;
+			root->nr_ranges = entry.nr_ranges;
+			memcpy(root->ranges, entry.ranges, sizeof(root->ranges));
+			policy->header.nr_roots++;
+		} else if (!strcmp(fields[0], "package")) {
+			struct sv_package_v2 *pkg;
+
+			if (policy->header.nr_packages == SV_MAX_PACKAGES ||
+			    v2_u32(fields[1], &map) ||
+			    v2_u32(fields[2], &uid) || !package_name(fields[3]))
+				goto bad;
+			for (i = 0; i < policy->header.nr_packages; i++) {
+				if (policy->packages[i].map_id == map &&
+				    !strcmp(policy->packages[i].name, fields[3]))
+					goto bad;
+			}
+			pkg = &policy->packages[policy->header.nr_packages++];
+			pkg->map_id = map;
+			pkg->uid = uid;
+			memcpy(pkg->name, fields[3], strlen(fields[3]) + 1);
+		} else {
+			goto bad;
+		}
+	}
+	if (ferror(f))
+		goto bad;
+	for (i = 0; i < policy->header.nr_packages; i++) {
+		unsigned int j;
+
+		for (j = 0; j < policy->header.nr_roots; j++) {
+			if (policy->packages[i].map_id == policy->roots[j].map_id)
+				break;
+		}
+		if (j == policy->header.nr_roots)
+			goto bad;
+	}
+	policy->header.roots_ptr = policy->header.nr_roots ?
+		(uintptr_t)policy->roots : 0;
+	policy->header.packages_ptr = policy->header.nr_packages ?
+		(uintptr_t)policy->packages : 0;
+	ret = 0;
+	goto out;
+bad:
+	set_error(err, errlen, path, lineno, "invalid v2 policy record");
+out:
+	free(line);
+	fclose(f);
+	return ret;
+}

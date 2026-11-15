@@ -15,3 +15,9 @@ Original kernel-side authorship and GPL-2.0 licensing are preserved.
 
 Module metadata author: **Rukani (Kaniruka)**.
 License: GPL-2.0 (`LICENSE`); syscall note: `LICENSES/Linux-syscall-note`.
+
+V2 interface extension (2026-11-15): vendored from the matching local
+android12-5.10 scoped_visibility child-aware implementation. V2 introduces
+pointer-based roots/package maps and bounded child authorization leases.
+The old published v1 commit alone does not supply this interface. Final source
+commit identity is recorded with the corresponding kernel artifact/release.

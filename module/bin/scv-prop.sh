@@ -4,8 +4,6 @@
 set -u
 umask 077
 
-SELF_DIR=$(dirname "$0")
-MODDIR=$(dirname "$SELF_DIR")
 STATE_DIR=${SCV_STATE_DIR:-/data/adb/scoped-storage-guard}
 KEY=persist.sys.vold_app_data_isolation_enabled
 REC=$STATE_DIR/prop.state

@@ -39,10 +39,14 @@ ACCEPT2=$STATE_DIR/.accept2.$$
 RES_TMP=$STATE_DIR/.resolve.$$
 SNAP_TMP=$STATE_DIR/.snapshot.$$
 DETAIL_TMP=$STATE_DIR/.detail.$$
+PACKAGES=$STATE_DIR/.packages.$$
+PACKAGES2=$STATE_DIR/.packages2.$$
+PROVIDERS=$STATE_DIR/.providers.$$
+PROVIDERS2=$STATE_DIR/.providers2.$$
 
 cleanup() {
 	rm -f "$LIST" "$LIST2" "$PROBE" "$PROBE2" "$ACCEPT" "$ACCEPT2" \
-		"$ACCEPT2.sorted" "$RES_TMP" "$SNAP_TMP" "$DETAIL_TMP" 2>/dev/null
+		"$PROVIDERS" "$PROVIDERS2" "$PACKAGES" "$PACKAGES2" "$PACKAGES.sorted" "$PACKAGES2.sorted" "$ACCEPT2.sorted" "$RES_TMP" "$SNAP_TMP" "$DETAIL_TMP" 2>/dev/null
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -95,7 +99,7 @@ lookup() { # path probefile - exact first field only
 }
 
 accept_obj() { # path fs dev ino
-	printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" >>"$ACCEPT"
+	printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$u" >>"$ACCEPT"
 }
 
 list_has() { # list item
@@ -280,7 +284,7 @@ explicit_fuse_path() { # user kind -> prints path
 }
 
 # ----------------------------------------------------------------- users ----
-pm_users=$(ns_run "$PM" list users 2>/dev/null)
+pm_users=$(ns_run "$PM" list users 2>/dev/null) || emit waiting PM_UNAVAILABLE
 [ -n "$pm_users" ] || emit config_required PM_UNAVAILABLE
 
 all_ids=$(printf '%s\n' "$pm_users" | sed -n 's/.*UserInfo{\([0-9][0-9]*\):.*/\1/p' | sort -n -u)
@@ -312,10 +316,12 @@ USER_COUNT=$(printf '%s\n' "$USERS" | grep -c .)
 # one exact match is required; nothing is derived arithmetically.
 PROVIDER_UIDS=
 PROVIDER_VERIFIED=
+: >"$PROVIDERS"
 if [ -n "$PROVIDER_PKG" ] && [ "$PROVIDER_UID" != off ]; then
 	for u in $running_ids; do
 		out=$(ns_run "$PM" list packages -U --user "$u" "$PROVIDER_PKG" 2>/dev/null)
 		rc=$?
+		printf '%s|%s\n' "$u" "$out" >>"$PROVIDERS"
 		if [ "$rc" -ne 0 ]; then
 			emit waiting "PROVIDER_QUERY_FAILED:$u"
 		fi
@@ -344,6 +350,29 @@ if [ -n "$PROVIDER_PKG" ] && [ "$PROVIDER_UID" != off ]; then
 fi
 PROVIDER_UID_COUNT=$(printf '%s\n' $PROVIDER_UIDS | grep -c .)
 
+
+# ---------------------------------------------------------- child identity ----
+# Query the full trusted PackageManager table, never infer appId arithmetic.
+# Every covered user's complete canonical response is mandatory. A double read
+# plus a stable running-user list detects concurrent changes, not an atomic PM
+# transaction; the kernel lease bounds stale authorization if this process dies.
+collect_packages() { # output file
+ : >"$1"
+ for user in $USERS; do
+  out=$(ns_run "$PM" list packages -U --user "$user" 2>/dev/null) || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out" | awk -v map="$user" '
+   NF != 2 || $1 !~ /^package:[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/ ||
+   $2 !~ /^uid:(0|[1-9][0-9]*)$/ { bad=1; next }
+   { name=substr($1,9); uid=substr($2,5);
+     if (length(name)>255 || length(uid)>10 || uid+0>=4294967295 || int((uid+0)/100000)!=map+0 || seen[name]++) {bad=1; next}
+     print "package\t" map "\t" uid "\t" name }
+   END { if (bad) exit 1 }' >>"$1" || return 1
+ done
+ sort "$1" >"$1.sorted" && mv -f "$1.sorted" "$1" || return 1
+ [ "$(wc -l <"$1")" -le 4096 ] || return 1
+}
+collect_packages "$PACKAGES" || emit waiting PM_SNAPSHOT_INVALID
 
 # ---------------------------------------------------------------- ranges ----
 # Sorted union of the explicit base identities and every UID PackageManager
@@ -542,18 +571,33 @@ fi
 [ -n "$FINAL_BAD" ] && emit config_required "NO_FUSE_VIEW:${FINAL_BAD# }"
 [ -n "$FINAL_MISSING" ] && emit waiting FUSE_PENDING
 
+awk -F'|' '{k=$3 "|" $4; if (k in maps && maps[k]!=$5) exit 1; maps[k]=$5}' "$ACCEPT" || emit config_required ROOT_MAP_CONFLICT
 sort -u "$ACCEPT" | awk -F'|' '{ k = $3 "|" $4; if (seen[k]++) next; print }' >"$ACCEPT2"
 sort -t'|' -k1,1 "$ACCEPT2" >"$ACCEPT2.sorted" && mv -f "$ACCEPT2.sorted" "$ACCEPT2"
 ENTRIES=$(grep -c . "$ACCEPT2")
 [ "$ENTRIES" -gt 32 ] && emit config_required OBJECT_LIMIT
 [ "$ENTRIES" -lt 1 ] && emit waiting NO_OBJECTS
 
-FP=$( { cat "$ACCEPT2"; printf '%s\n' "$RANGES" "$CONFIG_SHA"; } | sha256sum | cut -d' ' -f1 )
+if [ -n "$PROVIDER_PKG" ] && [ "$PROVIDER_UID" != off ]; then
+ : >"$PROVIDERS2"
+ for u in $running_ids; do
+  out=$(ns_run "$PM" list packages -U --user "$u" "$PROVIDER_PKG" 2>/dev/null) || emit waiting PROVIDER_SNAPSHOT_CHANGED
+  printf '%s|%s\n' "$u" "$out" >>"$PROVIDERS2"
+ done
+ cmp -s "$PROVIDERS" "$PROVIDERS2" || emit waiting PROVIDER_SNAPSHOT_CHANGED
+fi
+collect_packages "$PACKAGES2" || emit waiting PM_SNAPSHOT_INVALID
+cmp -s "$PACKAGES" "$PACKAGES2" || emit waiting PM_SNAPSHOT_CHANGED
+pm_users_after=$(ns_run "$PM" list users 2>/dev/null) || emit waiting PM_USERS_CHANGED
+[ "$pm_users_after" = "$pm_users" ] || emit waiting PM_USERS_CHANGED
+
+FP=$( { cat "$ACCEPT2" "$PACKAGES"; printf '%s\n' "$RANGES" "$CONFIG_SHA"; } | sha256sum | cut -d' ' -f1 )
 
 : >"$SNAP_TMP"
-while IFS='|' read -r p fs dev ino; do
-	printf '%s\t%s\n' "$p" "$RANGES" >>"$SNAP_TMP"
+while IFS='|' read -r p fs dev ino map; do
+	printf 'root\t%s\t%s\t%s\n' "$p" "$map" "$RANGES" >>"$SNAP_TMP"
 done <"$ACCEPT2"
+cat "$PACKAGES" >>"$SNAP_TMP"
 chmod 600 "$SNAP_TMP" 2>/dev/null
 mv -f "$SNAP_TMP" "$STATE_DIR/snapshot" 2>/dev/null || emit config_required SNAPSHOT_WRITE
 

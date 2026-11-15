@@ -40,7 +40,7 @@ echo "== manifest"
 (
 	cd "$STAGE"
 	printf '# Scoped Storage Guard %s\n' "$VER"
-	printf '# kernel interface commit 881d7ebcd59d5736a1155e562da61367649322af\n'
+	printf '# kernel interface scoped_visibility v2 child-aware + lease (SV_IOC_REPLACE_V2/GET_INFO_V2)\n'
 	printf '# CONFIG_SECURITY_SCOPED_VISIBILITY=y CONFIG_SECURITYFS=y\n'
 	find . -type f | LC_ALL=C sort | while IFS= read -r f; do
 		printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"

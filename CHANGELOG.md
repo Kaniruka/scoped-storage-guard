@@ -1,3 +1,20 @@
+# 2.0.0
+
+* Require the kernel v2 child-aware UAPI; refuse old-kernel mismatches.
+* Publish trusted PM package names and full UIDs per user, including shared UID
+  names, after matching double snapshots and stable user/provider observations.
+* Renew 60000ms kernel child leases each healthy cycle. On resolution failure,
+  retain verified roots and revoke children; failed revocation falls back to
+  lease expiry. Stop/disable/uninstall still release only the own generation.
+* Remove native-isolation property activation and ROM tmpfs prerequisites;
+  retain same-boot cleanup for property records from previous releases.
+* Add actual helper/parser/ABI and lifecycle tests. A read-only device resolver
+  dry-run found two users/eight roots/462 packages; no v2 policy was published.
+* Deployed with the matching v2 kernel on one mayfly Android 17 device:
+  ordinary-app own/cross checks on F2FS, Via with install permission, and MT's
+  controlled ZIP extraction passed. Other ROMs, OBB writes and performance
+  remain unverified; see README for scope and lifecycle limits.
+
 # Changelog
 
 ## 1.1.1 — 2026-11-14
