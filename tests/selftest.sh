@@ -188,6 +188,18 @@ line=$(grep -F '/data/media/9/Android/data' "$D/applied")
 case "$line" in *"10055-10055"*) ok "shared_provider: verified UID used" ;; *) bad "shared_provider: verified UID used" ;; esac
 case "$line" in *"90055-90055"*) bad "shared_provider: no invented per-user UID" ;; *) ok "shared_provider: no invented per-user UID" ;; esac
 
+# DownloadManager creates the destination dir in another app's Android/data
+# with the download provider's own UID, so every verified provider package
+# must join the allowlist.
+new_case multi_provider
+fixture_single
+printf '0:com.android.providers.downloads:10090\n' >>"$D/pkgs"
+printf 'provider_package=com.android.providers.downloads\n' >>"$D/scv.conf"
+run_sup
+eq "multi_provider: published" "$(state state)" PUBLISHED
+file_has "multi_provider: media provider uid authorized" "$D/state/snapshot" "10055-10055"
+file_has "multi_provider: download provider uid authorized" "$D/state/snapshot" "10090-10090"
+
 new_case provider_query_failed
 fixture_single
 export STUB_PM_RC=1

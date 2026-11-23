@@ -1,4 +1,24 @@
+# 2.0.2
+
+DownloadManager could no longer download into an app's own external files dir.
+
+`com.android.providers.downloads` creates the destination directory
+`Android/data/<pkg>/...` with its own UID, so a policy that authorized only
+root, system and the media provider denied it with ENOENT. The app store
+reported `492:Failed to create target dir`, and apps that fetch resources
+through DownloadManager surfaced it as "no network".
+
+* Changed: `provider_package` is repeatable; every verified provider UID joins
+  the allowlist. Default config adds `com.android.providers.downloads` next to
+  `com.android.providers.media.module`.
+* Added: `multi_provider` supervisor test (both UIDs present in the ranges).
+* Device evidence (mayfly, 2026-11-23): as UID 10176 (market) creating
+  `Android/data/com.xiaomi.market/files/apk/probe-<pid>` succeeded, as UID
+  10090 (download provider) every operation returned ENOENT; market log
+  `492:Failed to create target dir .../files/apk/com.zhihu.android`.
+
 # 2.0.1
+
 
 Fail-open release on controller failure. 2.0.0 answered any resolution failure
 with a roots-only publication, which the kernel applies as "deny every package

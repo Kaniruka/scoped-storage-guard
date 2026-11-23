@@ -66,6 +66,7 @@ Installed root-only at `<module>/config/scv.conf`:
 ```ini
 user=auto
 provider_package=com.android.providers.media.module
+provider_package=com.android.providers.downloads
 provider_uid=auto
 allow_uid=0
 allow_uid=1000
@@ -76,8 +77,13 @@ fs_allow=fuse,f2fs,ext4
 ```
 
 `user=auto` covers all users that `pm list users` reports as running. Repeated
-numeric `user=ID` lines select explicit running users. The provider is checked
-for every running user, including users outside the coverage set. A successful
+numeric `user=ID` lines select explicit running users. `provider_package` is
+repeatable: every verified provider UID joins the allowlist. The platform
+download provider must be included in practice, because DownloadManager creates
+the destination directory inside the requesting app's `Android/data/<pkg>` with
+its own UID; without it every download to an external files dir fails. The
+provider is checked for every running user, including users outside the
+coverage set. A successful
 empty provider response means it is not installed for that user; at least one
 verified provider UID is required unless provider lookup is disabled.
 `provider_uid=NUMBER` must match a reported UID; `off` disables provider lookup.

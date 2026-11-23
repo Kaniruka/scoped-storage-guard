@@ -173,7 +173,7 @@ u32_bound_ok() {
 # ---------------------------------------------------------------- config ----
 USERS_CFG=
 USERS_AUTO=1
-PROVIDER_PKG=com.android.providers.media.module
+PROVIDER_PKGS=
 PROVIDER_UID=auto
 ALLOW_UIDS=
 FUSE_ROOT=
@@ -213,7 +213,11 @@ while IFS= read -r raw || [ -n "$raw" ]; do
 		fi
 		;;
 	provider_package)
-		PROVIDER_PKG=$val
+		# Repeatable: every verified provider UID joins the allowlist. A
+		# download provider must be included, because DownloadManager creates
+		# the destination directory of another app's external files dir with
+		# its own UID.
+		[ -n "$val" ] && PROVIDER_PKGS="$PROVIDER_PKGS $val"
 		;;
 	provider_uid)
 		case "$val" in
@@ -317,28 +321,28 @@ USER_COUNT=$(printf '%s\n' "$USERS" | grep -c .)
 PROVIDER_UIDS=
 PROVIDER_VERIFIED=
 : >"$PROVIDERS"
-if [ -n "$PROVIDER_PKG" ] && [ "$PROVIDER_UID" != off ]; then
-	for u in $running_ids; do
-		out=$(ns_run "$PM" list packages -U --user "$u" "$PROVIDER_PKG" 2>/dev/null)
-		rc=$?
-		printf '%s|%s\n' "$u" "$out" >>"$PROVIDERS"
-		if [ "$rc" -ne 0 ]; then
-			emit waiting "PROVIDER_QUERY_FAILED:$u"
-		fi
-		if [ -z "$out" ]; then
-			# rc0 and no package: the provider is not installed for this user.
-			continue
-		fi
-		uid=$(printf '%s\n' "$out" | awk -v pkg="$PROVIDER_PKG" '
-			{ if ($1 == "package:" pkg && $2 ~ /^uid:[0-9]+$/) { sub(/^uid:/, "", $2); print $2 } }' | head -n1)
-		[ -n "$uid" ] || emit config_required "PROVIDER_RESPONSE_INVALID:$u"
-		[ "$uid" = 0 ] && emit config_required "PROVIDER_UID_ZERO:$u"
-		PROVIDER_UIDS="$PROVIDER_UIDS $uid"
+if [ -n "$PROVIDER_PKGS" ] && [ "$PROVIDER_UID" != off ]; then
+	for pkg in $PROVIDER_PKGS; do
+		for u in $running_ids; do
+			out=$(ns_run "$PM" list packages -U --user "$u" "$pkg" 2>/dev/null)
+			rc=$?
+			printf '%s|%s|%s;' "$pkg" "$u" "$out" >>"$PROVIDERS"
+			if [ "$rc" -ne 0 ]; then
+				emit waiting "PROVIDER_QUERY_FAILED:$pkg:$u"
+			fi
+			if [ -z "$out" ]; then
+				# rc0 and no package: this provider is not installed for this user.
+				continue
+			fi
+			uid=$(printf '%s' "$out" | awk -v pkg="$pkg" '
+				{ if ($1 == "package:" pkg && $2 ~ /^uid:[0-9]+$/) { sub(/^uid:/, "", $2); print $2 } }' | head -n1)
+			[ -n "$uid" ] || emit config_required "PROVIDER_RESPONSE_INVALID:$pkg:$u"
+			[ "$uid" = 0 ] && emit config_required "PROVIDER_UID_ZERO:$pkg:$u"
+			PROVIDER_UIDS="$PROVIDER_UIDS $uid"
+		done
 	done
 	PROVIDER_VERIFIED=$(printf '%s\n' $PROVIDER_UIDS | grep -v '^$' | sort -n -u | tr '\n' ' ')
-	if [ -z "$PROVIDER_VERIFIED" ]; then
-		emit config_required NO_PROVIDER_UID
-	fi
+	[ -n "$PROVIDER_VERIFIED" ] || emit config_required NO_PROVIDER_UID
 	if [ "$PROVIDER_UID" = auto ]; then
 		PROVIDER_UIDS=$PROVIDER_VERIFIED
 	else
@@ -578,11 +582,13 @@ ENTRIES=$(grep -c . "$ACCEPT2")
 [ "$ENTRIES" -gt 32 ] && emit config_required OBJECT_LIMIT
 [ "$ENTRIES" -lt 1 ] && emit waiting NO_OBJECTS
 
-if [ -n "$PROVIDER_PKG" ] && [ "$PROVIDER_UID" != off ]; then
+if [ -n "$PROVIDER_PKGS" ] && [ "$PROVIDER_UID" != off ]; then
  : >"$PROVIDERS2"
- for u in $running_ids; do
-  out=$(ns_run "$PM" list packages -U --user "$u" "$PROVIDER_PKG" 2>/dev/null) || emit waiting PROVIDER_SNAPSHOT_CHANGED
-  printf '%s|%s\n' "$u" "$out" >>"$PROVIDERS2"
+ for pkg in $PROVIDER_PKGS; do
+  for u in $running_ids; do
+   out=$(ns_run "$PM" list packages -U --user "$u" "$pkg" 2>/dev/null) || emit waiting PROVIDER_SNAPSHOT_CHANGED
+   printf '%s|%s|%s;' "$pkg" "$u" "$out" >>"$PROVIDERS2"
+  done
  done
  cmp -s "$PROVIDERS" "$PROVIDERS2" || emit waiting PROVIDER_SNAPSHOT_CHANGED
 fi
