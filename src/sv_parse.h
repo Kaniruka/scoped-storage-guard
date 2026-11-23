@@ -8,6 +8,12 @@
 
 #define SV_CONTROL_PATH "/sys/kernel/security/scoped_visibility/control"
 #define SV_DEFAULT_FS_ALLOW "fuse,f2fs,ext4"
+/*
+ * A 20 s healthy refresh must tolerate a slow PackageManager query, an APK
+ * install or a storage remount without letting the lease lapse. The kernel
+ * accepts up to SV_MAX_LEASE_MS.
+ */
+#define SV_DEFAULT_LEASE_MS 180000U
 #define SV_LINE_LIMIT (PATH_MAX + SV_MAX_RANGES * 24)
 
 int sv_parse_number(const char **text, uint64_t limit, uint64_t *result);

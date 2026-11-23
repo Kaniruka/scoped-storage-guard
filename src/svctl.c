@@ -14,8 +14,8 @@
 
 static void usage(void)
 {
-	fprintf(stderr, "usage: svctl [--control PATH] status|clear GENERATION|"
-		"replace GENERATION CONFIG\n");
+	fprintf(stderr, "usage: svctl [--control PATH] [--lease-ms N] "
+		"status|clear GENERATION|replace GENERATION CONFIG\n");
 }
 
 static int show_status(int fd)
@@ -46,11 +46,22 @@ int main(int argc, char **argv)
 	const char *control = SV_CONTROL_PATH, *end;
 	struct sv_policy_v2 *policy = NULL;
 	uint64_t generation;
+	uint64_t lease_ms = SV_DEFAULT_LEASE_MS;
 	int i = 1, fd, ret = 1, clear;
 	char err[512];
 
 	if (i + 1 < argc && !strcmp(argv[i], "--control")) {
 		control = argv[i + 1];
+		i += 2;
+	}
+	if (i + 1 < argc && !strcmp(argv[i], "--lease-ms")) {
+		end = argv[i + 1];
+		if (sv_parse_number(&end, SV_MAX_LEASE_MS, &lease_ms) || *end ||
+		    lease_ms < SV_MIN_LEASE_MS) {
+			fprintf(stderr, "lease must be %u..%u ms\n",
+				SV_MIN_LEASE_MS, SV_MAX_LEASE_MS);
+			return 2;
+		}
 		i += 2;
 	}
 	if (i >= argc)
@@ -80,7 +91,7 @@ int main(int argc, char **argv)
 		return 1;
 	policy->header.version = SV_VERSION_V2;
 	policy->header.expected_generation = generation;
-	policy->header.lease_ms = 60000;
+	policy->header.lease_ms = lease_ms;
 	if (!clear && sv_load_policy_v2(argv[i + 2], policy, err, sizeof(err))) {
 		fprintf(stderr, "%s\n", err);
 		goto out;

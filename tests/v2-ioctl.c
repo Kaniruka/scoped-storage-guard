@@ -20,7 +20,8 @@ int ioctl(int fd, unsigned long request, ...)
  if (request == SV_IOC_REPLACE_V2) {
   struct sv_snapshot_v2 *s = arg;
   struct sv_root_v2 *roots = (void *)(uintptr_t)s->roots_ptr;
-  if (s->version != 2 || s->lease_ms != 60000 || s->reserved || s->flags ||
+  if (s->version != 2 || s->lease_ms < SV_MIN_LEASE_MS ||
+      s->lease_ms > SV_MAX_LEASE_MS || s->reserved || s->flags ||
       s->expected_generation != info.generation ||
       (!s->nr_roots && s->roots_ptr) || (!s->nr_packages && s->packages_ptr)) { errno = EINVAL; return -1; }
   info.nr_entries = s->nr_roots; info.nr_packages = s->nr_packages;

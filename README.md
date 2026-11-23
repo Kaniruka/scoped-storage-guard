@@ -37,13 +37,22 @@ running-user list and provider responses to stay unchanged across resolution.
 No UID is invented from an appId. At most 32 roots and 4096 package rules.
 
 Each healthy supervisor cycle resolves the complete snapshot again and renews
-its 60000ms kernel lease, including when the table is unchanged. The default
-healthy interval is 20 seconds. On a later PM/storage/configuration failure it
-attempts to replace its own generation with the last verified roots and no
-child rules. This keeps the root ranges and denies ordinary app children. If
-replacement fails, the previous child authorization expires when its kernel
-lease runs out. Lease time uses monotonic time and does not include suspend.
-Root ranges do not expire. A foreign generation is never adopted or cleared.
+its 180000ms kernel lease, including when the table is unchanged. The default
+healthy interval is 20 seconds, so a slow `pm` query, an APK install or a
+storage remount does not let the lease lapse. Lease time uses monotonic time
+and does not include suspend. A foreign generation is never adopted or
+cleared.
+
+Failures are never answered with a child-less policy. While a verified
+snapshot exists, a transient PM/storage failure renews that snapshot for up to
+`SCV_STALE_GRACE` seconds (default 300) and reports `STALE`. Past that window,
+or after any hard configuration failure or abnormal supervisor exit, the
+module **releases its own generation** and reports `RELEASED`: the kernel then
+stops enforcing and ordinary DAC/SELinux behaviour applies. The same applies
+when the kernel lease expires, so a dead, stopped or stalled supervisor can
+never leave the device denying every application its own Android/data and
+Android/obb. Losing protection is preferable to a device-wide storage outage;
+the state and reason stay visible in `scvctl.sh status`.
 
 `post-fs-data.sh` performs only compatibility cleanup of a previous release's
 same-boot owned RAM property record. Stop/disable/uninstall explicitly release
@@ -102,10 +111,12 @@ State lives in `/data/adb/scoped-storage-guard` (0700; files 0600). Default
 status/logs contain no path list or UID table. Control status reports
 `lease_remaining_ms`; zero means expired or no active v2 policy. A nonzero
 package count alone does not prove authorization is still live. `PUBLISHED` means a complete
-snapshot was accepted. `GUARDED` means roots remain with ordinary child rules
-revoked after resolution failed. `LEASE_EXPIRING` means revocation could not be
-confirmed and the previous child lease is allowed to expire. `WAITING` before
-the first publication does **not** mean roots are protected.
+snapshot was accepted. `STALE` means resolution failed and the last verified
+snapshot is being renewed, so enforcement is still live but no longer matches
+PackageManager. `RELEASED` means the module withdrew its own generation and
+nothing is enforced. `WAITING` before the first publication does **not** mean
+roots are protected. An expired lease stops enforcing entirely rather than
+denying app children.
 
 ## Limits and lifecycle
 
@@ -114,8 +125,10 @@ the first publication does **not** mean roots are protected.
   user changes and provider changes can race a matching double snapshot. A new
   installation may temporarily lack access; a reused UID can temporarily inherit
   the old UID's authorization until refresh/revocation. A stopped or failed
-  supervisor cannot renew child grants beyond the 60-second running-time lease.
-  Provider/root ranges are explicit exemptions and survive lease expiry.
+  supervisor cannot renew child grants beyond the running-time lease; after it
+  lapses the kernel stops enforcing instead of denying every app.
+  Range-authorized identities are explicit exemptions and remain unaffected
+  while a policy is live.
 * Protection begins only after the first complete publication. Locked users,
   missing storage, unsupported kernels or PM failures can prevent it. Existing
   policy is not automatically adopted after supervisor restart; a foreign or
@@ -149,10 +162,13 @@ make arm64
 make test check
 make module
 KERNEL_IMAGE=/path/to/Image make smoke
+# kernel-side lease contract (own access after expiry)
+KERNEL_IMAGE=/path/to/Image make lease
 ```
 
 The test suite covers resolution across dash/mksh/BusyBox, PM consistency and
-shared UIDs, lease renewal, error-time child revocation, installer contracts,
+shared UIDs, lease renewal, transient-failure renewal and stale-window
+release instead of a child-less policy, installer contracts,
 UID bounds, and the real helpers' parser/UAPI boundary using an ioctl fixture.
 It does not substitute for a matching-kernel device test. Optional QEMU smoke
 checks the control node and an empty v2 publication only.

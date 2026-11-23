@@ -145,8 +145,8 @@ static int parse_fs_allow(const char *list)
 static void svreg_usage(const char *program)
 {
 	fprintf(stderr,
-		"usage: %s [--control PATH] [--fs-allow LIST] inspect DIRECTORY...\n"
-		"       %s [--control PATH] [--fs-allow LIST] apply EXPECTED_GENERATION CONFIG\n"
+		"usage: %s [--control PATH] [--fs-allow LIST] [--lease-ms N] inspect DIRECTORY...\n"
+		"       %s [--control PATH] [--fs-allow LIST] [--lease-ms N] apply EXPECTED_GENERATION CONFIG\n"
 		"       %s DIRECTORY...            (same as inspect)\n"
 		"\n"
 		"CONFIG v2: root<TAB>directory<TAB>map_id<TAB>ranges; package<TAB>map_id<TAB>uid<TAB>name. Ranges are always\n"
@@ -285,7 +285,7 @@ static int valid_info(const struct sv_info_v2 *info)
 }
 
 static int apply_snapshot(const char *control_path, const char *config_path,
-			  uint64_t generation)
+			  uint64_t generation, uint64_t lease_ms)
 {
 	struct sv_policy_v2 *policy;
 	struct sv_snapshot_v2 *snapshot;
@@ -301,7 +301,7 @@ static int apply_snapshot(const char *control_path, const char *config_path,
 	snapshot = &policy->header;
 	snapshot->version = SV_VERSION_V2;
 	snapshot->expected_generation = generation;
-	snapshot->lease_ms = 60000;
+	snapshot->lease_ms = lease_ms;
 
 	control = open(control_path, O_RDWR | O_CLOEXEC);
 	if (control < 0) {
@@ -443,6 +443,7 @@ int main(int argc, char **argv)
 	const char *allow = SV_DEFAULT_FS_ALLOW;
 	int i = 1, rc;
 	uint64_t generation;
+	uint64_t lease_ms = SV_DEFAULT_LEASE_MS;
 	const char *end;
 
 	while (i < argc && argv[i][0] == '-') {
@@ -453,6 +454,17 @@ int main(int argc, char **argv)
 		}
 		if (!strcmp(argv[i], "--fs-allow") && i + 1 < argc) {
 			allow = argv[i + 1];
+			i += 2;
+			continue;
+		}
+		if (!strcmp(argv[i], "--lease-ms") && i + 1 < argc) {
+			end = argv[i + 1];
+			if (sv_parse_number(&end, SV_MAX_LEASE_MS, &lease_ms) || *end ||
+			    lease_ms < SV_MIN_LEASE_MS) {
+				fprintf(stderr, "lease must be %u..%u ms\n",
+					SV_MIN_LEASE_MS, SV_MAX_LEASE_MS);
+				return SVREG_USAGE;
+			}
 			i += 2;
 			continue;
 		}
@@ -483,7 +495,7 @@ int main(int argc, char **argv)
 				"decimal\n");
 			return SVREG_USAGE;
 		}
-		rc = apply_snapshot(control, argv[i + 2], generation);
+		rc = apply_snapshot(control, argv[i + 2], generation, lease_ms);
 	} else if (!strcmp(argv[i], "inspect")) {
 		rc = inspect_paths(argc - i - 1, argv + i + 1);
 	} else {

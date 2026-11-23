@@ -5,6 +5,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	--fs-allow) ALLOW=$2; shift 2 ;;
 	--control) shift 2 ;;
+	--lease-ms) shift 2 ;;
 	*) break ;;
 	esac
 done
@@ -49,6 +50,10 @@ apply)
 	gen=$1
 	conf=$2
 	echo "apply gen=$gen" >>"$STUB_CALLS/all"
+	n=0
+	[ ! -f "$STUB_CALLS/apply.n" ] || n=$(cat "$STUB_CALLS/apply.n")
+	n=$((n + 1)); echo "$n" >"$STUB_CALLS/apply.n"
+	if [ -n "${STUB_APPLY_FAIL_AFTER:-}" ] && [ "$n" -gt "$STUB_APPLY_FAIL_AFTER" ]; then exit 4; fi
 	cur=$(cat "$STUB_GEN")
 	[ "$gen" = "$cur" ] || exit 3
 	if [ -n "${STUB_BUMP_BEFORE_APPLY:-}" ]; then

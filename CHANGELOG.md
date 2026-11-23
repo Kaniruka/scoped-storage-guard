@@ -1,3 +1,38 @@
+# 2.0.1
+
+Fail-open release on controller failure. 2.0.0 answered any resolution failure
+with a roots-only publication, which the kernel applies as "deny every package
+child". One transient PackageManager query during an app download therefore
+removed every app's own `Android/data` and `Android/obb` (app-store downloads
+failed; apps with an external cache reported no network), and a supervisor that
+died in that state left the phone that way until reboot.
+
+* Changed (supervisor): a transient PM/storage/provider failure now renews the
+  last verified snapshot (roots **and** package rules) for `SCV_STALE_GRACE`
+  seconds (default 300) and reports `STALE`. No child-less policy is ever
+  published by the module.
+* Changed (supervisor): past the stale window, on a hard configuration failure,
+  on a failed republish or on an abnormal exit, the module releases its own
+  generation (`RELEASED`). A zero-status exit leaves the policy to the kernel
+  lease, which now also stops enforcing instead of denying.
+* Changed (kernel): an expired v2 lease stops enforcing completely. Previously
+  every non-range child lookup returned ENOENT forever after the lease lapsed,
+  so a dead or stalled supervisor was a device-wide storage outage. Explicit
+  roots-only publications from a trusted administrator still deny all children.
+* Changed: default lease is 180000 ms (was 60000) so a slow `pm` query, an APK
+  install or a remount cannot lapse authorization between two healthy cycles.
+  `svreg`/`svctl` accept `--lease-ms N` (1000..300000).
+* Fixed (`action.sh`): the manager action read the removed `isolate=` field
+  instead of `enforcement=`.
+* Added: `tests/regression-fail-open.sh` (offline supervisor regression),
+  `tests/vm/lease.c` + `make lease` (real-kernel lease/deny-all contract in
+  QEMU), and updated kernel/supervisor tests for the fail-open contract.
+* Verified: module host suite 120/120, regression script 8/8, QEMU lease
+  contract PASS on the rebuilt rootless Image, kernel v2 selftest 22/22 +
+  37/37 native and compat.
+
+# 2.0.0
+
 # 2.0.0
 
 * Require the kernel v2 child-aware UAPI; refuse old-kernel mismatches.

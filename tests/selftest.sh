@@ -56,7 +56,7 @@ EOF
 	export SCV_GETPROP=$STUBS/getprop SCV_PM=$STUBS/pm
 	export SCV_NS_MODE=direct SCV_WAIT_INTERVAL=0 SCV_STEADY_INTERVAL=0 SCV_SLOW_INTERVAL=0
 	export SCV_MAX_WAIT=1 SCV_MAX_CYCLES=1 SCV_MAX_APPLY_FAIL=2 SCV_CONTROL_TRIES=1
-	unset STUB_INO_BUMP_AFTER STUB_BUMP_BEFORE_APPLY STUB_REMOVE_AFTER STUB_REMOVE_PATH STUB_CLEAR_JUMP STUB_PM_RC STUB_PM_GARBAGE STUB_CHILD_FAIL_AFTER STUB_CHILD_CHANGE_AFTER STUB_CHILD_PKGS
+	unset STUB_INO_BUMP_AFTER STUB_BUMP_BEFORE_APPLY STUB_REMOVE_AFTER STUB_REMOVE_PATH STUB_CLEAR_JUMP STUB_PM_RC STUB_PM_GARBAGE STUB_CHILD_FAIL_AFTER STUB_CHILD_CHANGE_AFTER STUB_CHILD_PKGS STUB_APPLY_FAIL_AFTER SCV_STALE_GRACE SCV_LEASE_MS
 }
 
 add_user() { printf 'UserInfo{%s:Owner:c13} running\n' "$1" >>"$D/users"; }
@@ -376,12 +376,24 @@ fixture_single
 export STUB_REMOVE_AFTER=1 STUB_REMOVE_PATH=/data/media/0/Android/data
 export SCV_MAX_CYCLES=2
 run_sup
-eq "guard: roots remain after object loss" "$(cat "$D/count")" 4
+eq "stale: roots remain after object loss" "$(cat "$D/count")" 4
+eq "stale: package rules are renewed, never dropped" "$(grep -c '^package' "$D/applied")" 1
 case "$(state state)" in
-GUARDED) ok "clear: protected failure state" ;;
-*) bad "clear: back to waiting ($(state state))" ;;
+STALE) ok "stale: last verified snapshot renewed" ;;
+*) bad "stale: expected STALE ($(state state))" ;;
 esac
-file_has "clear: used own generation" "$D/calls/all" "apply gen=2"
+file_has "stale: used own generation" "$D/calls/all" "apply gen=2"
+
+# Past the grace window the module stops enforcing instead of denying apps.
+new_case stale_release
+fixture_single
+export STUB_REMOVE_AFTER=1 STUB_REMOVE_PATH=/data/media/0/Android/data
+export SCV_MAX_CYCLES=2 SCV_STALE_GRACE=-1
+run_sup
+eq "release: no child-less deny-all publication" "$(grep -c '^package' "$D/applied")" 1
+eq "release: enforcement cleared" "$(cat "$D/count")" 0
+eq "release: state" "$(state state)" RELEASED
+file_has "release: cleared own generation" "$D/calls/all" "clear 2"
 
 new_case stop
 fixture_single
@@ -427,8 +439,17 @@ fixture_single
 export SCV_MAX_CYCLES=2 STUB_CHILD_FAIL_AFTER=2
 run_sup
 eq "PM: roots retained on later query failure" "$(cat "$D/count")" 4
-eq "PM: child authorizations revoked" "$(grep -c '^package' "$D/applied")" 0
-eq "PM: supervisor reports guarded" "$(state state)" GUARDED
+eq "PM: child authorizations renewed, not revoked" "$(grep -c '^package' "$D/applied")" 1
+eq "PM: supervisor reports stale" "$(state state)" STALE
+
+# A failed republish must release enforcement, never publish a deny-all copy.
+new_case republish_release
+fixture_single
+export SCV_MAX_CYCLES=2 STUB_APPLY_FAIL_AFTER=1
+run_sup
+eq "republish: enforcement cleared" "$(cat "$D/count")" 0
+eq "republish: state" "$(state state)" RELEASED
+eq "republish: no child-less policy published" "$(grep -c '^package' "$D/applied")" 1
 
 new_case shared_uid
 fixture_single

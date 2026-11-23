@@ -2,6 +2,7 @@
 # Offline stub of the built svctl helper (tests only).
 [ -e "$STUB_CONTROL" ] || exit 1
 [ "${1:-}" != --control ] || shift 2
+[ "${1:-}" != --lease-ms ] || shift 2
 case "$1" in
 status)
 	printf 'generation=%s count=%s\n' "$(cat "$STUB_GEN")" "$(cat "$STUB_COUNT")"

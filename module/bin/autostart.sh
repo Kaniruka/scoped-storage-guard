@@ -31,6 +31,13 @@ MAX_APPLY_FAIL=${SCV_MAX_APPLY_FAIL:-3}
 LOG_MAX=${SCV_LOG_MAX:-65536}
 CONTROL_TRIES=${SCV_CONTROL_TRIES:-3}
 
+# Kernel lease: a healthy 20 s refresh survives a slow PackageManager query,
+# an APK install or a storage remount without letting child authorization lapse.
+LEASE_MS=$(printf '%s' "${SCV_LEASE_MS:-180000}")
+# How long the last verified snapshot may be renewed while resolution fails.
+# Past this window the module stops enforcing instead of denying every app.
+STALE_GRACE=$(printf '%s' "${SCV_STALE_GRACE:-300}")
+
 BOOT_ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
 [ -n "$BOOT_ID" ] || BOOT_ID=unknown
 STATUS=$STATE_DIR/status
@@ -47,6 +54,7 @@ REASON=
 PUBLISHED=0
 EXPECT_GEN=
 SAVED_GEN=
+LAST_OK=
 FS_ALLOW=fuse,f2fs,ext4
 ISO=kernel-v2
 FAILS=0
@@ -199,36 +207,76 @@ read_status() {
 	return 0
 }
 
+# One parser for the helper's publication line, shared by publish and renew.
+published_gen() { # helper output -> generation on stdout
+	echo "$1" | awk '/^PUBLISHED generation=/ { gsub(/[^0-9]/, "", $2); print $2; exit }'
+}
+
 do_apply() {
-	out=$(ns_run "$SVREG" --control "$CONTROL" --fs-allow "$FS_ALLOW" apply "$1" "$SNAPSHOT" 2>&1)
+	out=$(ns_run "$SVREG" --control "$CONTROL" --fs-allow "$FS_ALLOW" --lease-ms "$LEASE_MS" apply "$1" "$SNAPSHOT" 2>&1)
 	RC=$?
-	NEW_GEN=$(printf '%s\n' "$out" | sed -n 's/^PUBLISHED generation=\([0-9][0-9]*\).*/\1/p' | tail -n1)
+	NEW_GEN=$(published_gen "$out")
 	return 0
 }
 
 save_guard() {
- grep '^root' "$SNAPSHOT" >"$STATE_DIR/.guard.$$" || return 1
- chmod 600 "$STATE_DIR/.guard.$$"
- mv -f "$STATE_DIR/.guard.$$" "$STATE_DIR/guard.snapshot"
+ # Keep the complete verified snapshot (roots AND package rules). A later
+ # transient failure renews this file; it never publishes a roots-only copy.
+ cp -f "$SNAPSHOT" "$STATE_DIR/.guard.$$" 2>/dev/null || return 1
+ chmod 600 "$STATE_DIR/.guard.$$" 2>/dev/null
+ mv -f "$STATE_DIR/.guard.$$" "$STATE_DIR/guard.snapshot" 2>/dev/null
 }
 
-revoke_children() {
- [ -s "$STATE_DIR/guard.snapshot" ] || return 1
- if ! read_status || [ "$C_GEN" != "$SAVED_GEN" ]; then
-  set_state CONFLICT revoke-generation-unverified
+# Resolution failed but the controller is healthy: renew the last verified
+# snapshot so ordinary apps keep their own Android/data instead of inheriting
+# a device-wide denial from one transient PackageManager query.
+renew_verified() { # reason
+ [ "$PUBLISHED" -eq 1 ] && [ -s "$STATE_DIR/guard.snapshot" ] || return 1
+ out=$(ns_run "$SVREG" --control "$CONTROL" --fs-allow "$FS_ALLOW" --lease-ms "$LEASE_MS" apply "$EXPECT_GEN" "$STATE_DIR/guard.snapshot" 2>&1)
+ rc=$?
+ newg=$(published_gen "$out")
+ if [ "$rc" = 0 ] && [ -n "$newg" ]; then
+  SAVED_GEN=$newg
+  EXPECT_GEN=$newg
+  set_state STALE "renewed:$1"
+  return 0
+ fi
+ return 1
+}
+
+# Stop enforcing. A failed or stale controller must leave the device in the
+# state it had before installation, never in a state that denies every app.
+release_own() { # reason
+ if [ "$PUBLISHED" -eq 0 ]; then
+  set_state RELEASED "$1"
+  return 0
+ fi
+ if ! read_status; then
+  set_state RELEASED "release-unverified:$1"
+  return 1
+ fi
+ if [ "$C_GEN" != "$SAVED_GEN" ]; then
+  set_state CONFLICT "foreign-generation:$C_GEN"
   drop_lock
   exit 4
  fi
- out=$(ns_run "$SVREG" --control "$CONTROL" --fs-allow "$FS_ALLOW" apply "$SAVED_GEN" "$STATE_DIR/guard.snapshot" 2>&1)
+ ns_run "$SVCTL" --control "$CONTROL" --lease-ms "$LEASE_MS" clear "$SAVED_GEN" >/dev/null 2>&1
  rc=$?
- new=$(printf '%s\n' "$out" | sed -n 's/^PUBLISHED generation=\([0-9][0-9]*\).*/\1/p' | tail -n1)
- if [ "$rc" = 0 ] && [ -n "$new" ]; then
-  SAVED_GEN=$new
-  EXPECT_GEN=$new
-  set_state GUARDED "$1"
- else
-  set_state LEASE_EXPIRING "revoke-failed:$rc"
+ if [ "$rc" -ne 0 ]; then
+  set_state RELEASED "release-failed:$1"
+  return 1
  fi
+ CLEARED_FROM=$SAVED_GEN
+ PUBLISHED=0
+ SAVED_GEN=
+ EXPECT_GEN=$((CLEARED_FROM + 1))
+ if read_status && [ "$C_COUNT" != 0 ]; then
+  set_state CONFLICT "foreign-policy-after-release"
+  drop_lock
+  exit 4
+ fi
+ set_state RELEASED "$1"
+ return 0
 }
 
 clear_own() {
@@ -246,7 +294,7 @@ clear_own() {
 		drop_lock
 		exit 4
 	fi
-	ns_run "$SVCTL" --control "$CONTROL" clear "$SAVED_GEN" >/dev/null 2>&1
+	ns_run "$SVCTL" --control "$CONTROL" --lease-ms "$LEASE_MS" clear "$SAVED_GEN" >/dev/null 2>&1
 	rc=$?
 	if [ "$rc" -ne 0 ]; then
 		set_state CLEAR_FAILED "clear-exit:$rc"
@@ -279,6 +327,19 @@ clear_own() {
 	return 0
 }
 
+on_exit() {
+    rc=$?
+    trap - EXIT INT TERM HUP
+    # A zero-status exit is a controlled stop (disable, test cycle limit); the
+    # kernel lease then lapses and enforcement stops on its own. Only an
+    # abnormal exit releases immediately, so a crash can never leave the
+    # device denying every application's own Android/data.
+    if [ "$rc" -ne 0 ] && [ "$PUBLISHED" -eq 1 ]; then
+        release_own "exit:$rc" >/dev/null 2>&1
+    fi
+    exit "$rc"
+}
+
 on_signal() {
 	trap - INT TERM HUP
 	log_line "signal-stop"
@@ -299,6 +360,7 @@ fix_legacy_perms() {
 
 # ------------------------------------------------------------------ main ----
 take_lock || exit 0
+trap on_exit EXIT
 trap on_signal INT TERM HUP
 mkdir -p "$STATE_DIR" 2>/dev/null || exit 1
 chmod 700 "$STATE_DIR" 2>/dev/null
@@ -369,35 +431,41 @@ while :; do
 
 
 	do_resolve
-	case "$RES_STATUS" in
-	ok) ;;
-	*)
-		if [ "$PUBLISHED" -eq 1 ]; then
-			revoke_children "resolve-$RES_STATUS"
-		fi
-		case "$RES_STATUS" in
-		waiting)
-			if [ "$PUBLISHED" = 1 ]; then
-			 [ "$STATE" = LEASE_EXPIRING ] || set_state GUARDED "$RES_REASON"
-			else set_state WAITING "$RES_REASON"; fi
-			;;
-		*)
-			if [ "$PUBLISHED" = 1 ]; then
-			 [ "$STATE" = LEASE_EXPIRING ] || set_state GUARDED "$RES_REASON"
-			else set_state CONFIG_REQUIRED "$RES_REASON"; fi
-			;;
-		esac
-		if [ "$RES_STATUS" = waiting ] && [ "$WAITED" -lt "$MAX_WAIT" ]; then
-			sleep "$WAIT_INTERVAL"
-			WAITED=$((WAITED + WAIT_INTERVAL))
-		else
-			sleep "$SLOW_INTERVAL"
-		fi
-		continue
-		;;
-	esac
+    case "$RES_STATUS" in
+    ok)
+        LAST_OK=$(date +%s 2>/dev/null)
+        [ -n "$LAST_OK" ] || LAST_OK=0
+        ;;
+    *)
+        now=$(date +%s 2>/dev/null)
+        [ -n "$now" ] || now=0
+        last=$LAST_OK
+        [ -n "$last" ] || last=$now
+        if [ "$PUBLISHED" -eq 1 ]; then
+            age=$((now - last))
+            if [ "$age" -le "$STALE_GRACE" ] &&
+                renew_verified "$RES_STATUS:$RES_REASON"; then
+                : # still enforcing the last verified snapshot
+            else
+                release_own "stale:$RES_STATUS:$RES_REASON"
+            fi
+        else
+            case "$RES_STATUS" in
+            waiting) set_state WAITING "$RES_REASON" ;;
+            *) set_state CONFIG_REQUIRED "$RES_REASON" ;;
+            esac
+        fi
+        if [ "$RES_STATUS" = waiting ] && [ "$WAITED" -lt "$MAX_WAIT" ]; then
+            sleep "$WAIT_INTERVAL"
+            WAITED=$((WAITED + WAIT_INTERVAL))
+        else
+            sleep "$SLOW_INTERVAL"
+        fi
+        continue
+        ;;
+    esac
 
-	if [ "$PUBLISHED" -eq 0 ]; then
+    if [ "$PUBLISHED" -eq 0 ]; then
 		if ! read_status; then
 			set_state FAILED control-unreadable
 			sleep "$SLOW_INTERVAL"
@@ -423,6 +491,8 @@ while :; do
 			EXPECT_GEN=$SAVED_GEN
 			save_guard
 			FAILS=0
+			LAST_OK=$(date +%s 2>/dev/null)
+			[ -n "$LAST_OK" ] || LAST_OK=0
 			set_state PUBLISHED "own-generation:$SAVED_GEN"
 			;;
 		3)
@@ -459,6 +529,8 @@ while :; do
 			EXPECT_GEN=$SAVED_GEN
 			save_guard
 			FAILS=0
+			LAST_OK=$(date +%s 2>/dev/null)
+			[ -n "$LAST_OK" ] || LAST_OK=0
 			set_state PUBLISHED "republished:$SAVED_GEN"
 			;;
 		3)
@@ -468,7 +540,7 @@ while :; do
 			;;
 		*)
 			FAILS=$((FAILS + 1))
-			revoke_children "republish-exit:$RC"
+			release_own "republish-exit:$RC"
 			if [ "$FAILS" -ge "$MAX_APPLY_FAIL" ]; then
 				drop_lock
 				exit 1

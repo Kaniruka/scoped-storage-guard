@@ -19,4 +19,16 @@ if SCV_TEST_V1=1 LD_PRELOAD="$work/ioctl.so" out/svreg --control "$work/control"
 fi
 printf 'root\t%s\t0\t0-0\n' "$work" >"$work/guard"
 LD_PRELOAD="$work/ioctl.so" out/svreg --control "$work/control" apply 0 "$work/guard" | grep -q 'PUBLISHED generation=1 count=1'
-echo 'v2 helpers: parser, old-kernel rejection, child publication and root-only guard passed'
+# The lease is explicit: the default tolerates a slow pm query, and an
+# out-of-range value is refused before the control node is touched.
+LD_PRELOAD="$work/ioctl.so" out/svreg --control "$work/control" --lease-ms 90000 apply 0 "$work/policy" | grep -q 'PUBLISHED generation=1 count=1'
+if LD_PRELOAD="$work/ioctl.so" out/svreg --control "$work/control" --lease-ms 999 apply 0 "$work/policy" >/dev/null 2>&1; then
+ echo 'FAIL out-of-range lease accepted'; exit 1
+fi
+if LD_PRELOAD="$work/ioctl.so" out/svreg --control "$work/control" --lease-ms 300001 apply 0 "$work/policy" >/dev/null 2>&1; then
+ echo 'FAIL oversized lease accepted'; exit 1
+fi
+if LD_PRELOAD="$work/ioctl.so" out/svctl --control "$work/control" --lease-ms 0 clear 1 >/dev/null 2>&1; then
+ echo 'FAIL svctl accepted an invalid lease'; exit 1
+fi
+echo 'v2 helpers: parser, old-kernel rejection, child publication, lease bounds and root-only guard passed'

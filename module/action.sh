@@ -5,7 +5,7 @@ MODDIR=$(dirname "$0")
 STATE_DIR=${SCV_STATE_DIR:-/data/adb/scoped-storage-guard}
 echo "== state =="
 if [ -f "$STATE_DIR/status" ]; then
-	grep -E '^(state|reason|generation|count|users|isolate)=' "$STATE_DIR/status" 2>/dev/null
+	grep -E '^(state|reason|generation|count|users|enforcement)=' "$STATE_DIR/status" 2>/dev/null
 else
 	echo "no state file (module never started this boot)"
 fi

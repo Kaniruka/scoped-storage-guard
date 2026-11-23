@@ -11,7 +11,7 @@ REPRO := -Wl,--build-id=none -ffile-prefix-map=$(CURDIR)=.
 OUT := out
 HELPERS := src/svreg.c src/svctl.c src/sv_parse.c
 
-.PHONY: all host arm64 test module clean check smoke
+.PHONY: all host arm64 test module clean check smoke lease
 
 all: host
 
@@ -41,6 +41,7 @@ test: host
 	bash tests/resolver.sh
 	bash tests/host-svreg.sh
 	bash tests/v2-helper.sh
+	bash tests/regression-fail-open.sh
 
 module: arm64 host
 	bash build.sh
@@ -56,3 +57,6 @@ clean:
 	rm -rf $(OUT) build
 smoke: arm64
 	KERNEL_IMAGE="$(KERNEL_IMAGE)" bash tests/vm/run-qemu.sh
+
+lease: arm64
+	KERNEL_IMAGE="$(KERNEL_IMAGE)" bash tests/vm/run-lease.sh

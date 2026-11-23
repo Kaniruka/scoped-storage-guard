@@ -1,6 +1,6 @@
 id=scoped_storage_guard
 name=Scoped Storage Guard
-version=2.0.0
-versionCode=2000
+version=2.0.1
+versionCode=2001
 author=Rukani (Kaniruka)
 description=Kernel v2 child-aware app-data authorization from verified PackageManager full UIDs, with bounded authorization leases. Requires matching v2 kernel; no ROM isolation property required.
